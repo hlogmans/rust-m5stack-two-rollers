@@ -86,9 +86,47 @@ async fn main(spawner: Spawner) -> ! {
     let mut last_valid_angle: u16 = 0;
     let mut last_steps: Option<i32> = None;
     let mut last_reported_angle: Option<u16> = None;
+    
+    // Position control: step through angles in 5-degree increments
+    let mut current_target_angle: u16 = 0;
+    let mut position_control_counter: u32 = 0;
+    let mut current_speed: i32 = 10; // Start at 10 RPM
+    let mut speed_update_counter: u32 = 0;
 
         // Main application loop - read Roller485 angle and display
     loop {
+            // Every 1 second (at 50ms intervals = 20 iterations), move to next 15-degree step
+            position_control_counter += 1;
+            if position_control_counter >= 20 {
+                position_control_counter = 0;
+                
+                // Move to next position (15° step for better visibility of speed)
+                if let Err(e) = roller485.move_to_angle(current_target_angle) {
+                    log::warn!("Failed to set motor position: {:?}", e);
+                } else {
+                    info!("Motor moving to target angle: {}° at {} RPM", current_target_angle, current_speed);
+                }
+                
+                // Increment to next 15° step
+                current_target_angle = (current_target_angle + 15) % 360;
+            }
+
+            // Every 10 seconds (200 iterations of 50ms), increase speed by 5 RPM
+            speed_update_counter += 1;
+            if speed_update_counter >= 200 {
+                speed_update_counter = 0;
+                current_speed += 5;
+                if current_speed > 50 {
+                    current_speed = 10; // Reset to 10 RPM when reaching 50
+                }
+                
+                if let Err(e) = roller485.set_speed(current_speed) {
+                    log::warn!("Failed to set motor speed: {:?}", e);
+                } else {
+                    info!("Motor speed set to: {} RPM", current_speed);
+                }
+            }
+
             // Periodically ensure we're in encoder mode (in case user switched modes on device)
             if loop_counter % 500 == 0 {
                 if let Err(e) = roller485.ensure_encoder_mode() {

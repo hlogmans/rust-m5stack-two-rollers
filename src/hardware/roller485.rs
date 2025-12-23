@@ -25,10 +25,12 @@ mod registers {
     pub const MOTOR_ENABLE_REG: u8 = 0x00;
     /// Motor mode setting (1 byte: 0x01=speed, 0x02=position, 0x03=current, 0x04=encoder)
     pub const MODE_REG: u8 = 0x01;
+    /// Speed Setting register (4 bytes, little-endian i32, set target speed in RPM)
+    pub const SPEED_CONTROL_REG: u8 = 0x40;
+    /// Position Control register (4 bytes, little-endian i32, set target position)
+    pub const POSITION_CONTROL_REG: u8 = 0x80;
     /// Position Readback register (4 bytes, little-endian i32, divide by 100 for actual position)
     pub const POSITION_READBACK_REG: u8 = 0x90;
-    /// Motor speed register (16-bit)
-    pub const SPEED_REG: u8 = 0x20;
 }
 
 /// Roller485 operational modes
@@ -187,6 +189,67 @@ where
     pub fn read_angle_deg(&mut self) -> Result<u16, I2C::Error> {
         let block = self.read_angle_block()?;
         Ok(block.angle_deg)
+    }
+
+    /// Move motor to target angle in steps of 5 degrees.
+    /// The motor will move from current position to target angle.
+    /// Automatically switches to Position Control mode.
+    ///
+    /// # Arguments
+    /// * `target_angle_deg` - Target angle in degrees (0-359)
+    pub fn move_to_angle(&mut self, target_angle_deg: u16) -> Result<(), I2C::Error> {
+        // Switch to Position Control mode (0x02) if not already there
+        let current_mode = self.read_mode()?;
+        if current_mode != Roller485Mode::Position {
+            self.set_mode(Roller485Mode::Position)?;
+        }
+        
+        // Normalize angle to 0-359 range
+        let normalized_angle = (target_angle_deg % 360) as i32;
+        
+        // Convert angle to position steps: (angle / 360) * 333 steps per rotation
+        let target_steps = (normalized_angle * 333) / 360;
+        
+        // Device wants position / 100, so multiply by 100
+        let target_position = target_steps * 100;
+        
+        // Convert to little-endian bytes (4-byte i32)
+        let bytes = target_position.to_le_bytes();
+        
+        // Write to position control register
+        self.i2c.write(self.address, &[
+            registers::POSITION_CONTROL_REG,
+            bytes[0],
+            bytes[1],
+            bytes[2],
+            bytes[3],
+        ])?;
+        
+        Ok(())
+    }
+
+    /// Set the motor speed (RPM).
+    /// The motor will accelerate/decelerate to this speed.
+    ///
+    /// # Arguments
+    /// * `speed_rpm` - Target speed in RPM (positive = forward, negative = reverse)
+    pub fn set_speed(&mut self, speed_rpm: i32) -> Result<(), I2C::Error> {
+        // Device wants speed / 100, so multiply by 100
+        let speed_value = speed_rpm * 100;
+        
+        // Convert to little-endian bytes (4-byte i32)
+        let bytes = speed_value.to_le_bytes();
+        
+        // Write to speed control register
+        self.i2c.write(self.address, &[
+            registers::SPEED_CONTROL_REG,
+            bytes[0],
+            bytes[1],
+            bytes[2],
+            bytes[3],
+        ])?;
+        
+        Ok(())
     }
 
     /// Ensure the device is in encoder reading mode
