@@ -89,8 +89,8 @@ pub fn init<'a>(
     log::info!("Initializing ILI9342C display controller...");
     let display = Builder::new(ILI9342CRgb565, di)
         .reset_pin(rst)
-        .color_order(mipidsi::options::ColorOrder::Bgr)
-        .invert_colors(mipidsi::options::ColorInversion::Inverted)
+        .color_order(mipidsi::options::ColorOrder::Rgb)
+        .invert_colors(mipidsi::options::ColorInversion::Normal)
         .init(&mut delay)
         .expect("Failed to initialize display");
 
@@ -191,6 +191,34 @@ impl<D: DrawTarget<Color = Rgb565>> Display<D> {
         
         // Draw the angle value centered with the specified color
         self.draw_centered_text(&buffer, center, color);
+    }
+
+    /// Update two angle readouts labeled A and B
+    ///
+    /// Draws two compact labels centered vertically around the middle.
+    /// Clears only the small regions to avoid flicker.
+    pub fn update_dual_angles(&mut self, angle_a: u16, angle_b: u16) {
+        let center = Point::new(W / 2, H / 2);
+
+        // Areas for A (above center) and B (below center)
+        let area_a = Rectangle::new(Point::new(center.x - 70, center.y - 35), Size::new(140, 28));
+        let area_b = Rectangle::new(Point::new(center.x - 70, center.y + 7), Size::new(140, 28));
+
+        let _ = area_a.into_styled(PrimitiveStyle::with_fill(colors::black())).draw(&mut self.inner);
+        let _ = area_b.into_styled(PrimitiveStyle::with_fill(colors::black())).draw(&mut self.inner);
+
+        // Format strings
+        let mut buf_a = heapless::String::<16>::new();
+        let _ = write!(buf_a, "A: {}°", angle_a);
+        let mut buf_b = heapless::String::<16>::new();
+        let _ = write!(buf_b, "B: {}°", angle_b);
+
+        // Positions: slightly above/below center
+        let pos_a = Point::new(center.x, center.y - 20);
+        let pos_b = Point::new(center.x, center.y + 20);
+
+        self.draw_centered_text(&buf_a, pos_a, colors::white());
+        self.draw_centered_text(&buf_b, pos_b, colors::white());
     }
 
     /// Expose screen size for convenience.

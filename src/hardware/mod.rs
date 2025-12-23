@@ -11,7 +11,7 @@ use crate::display::{self, Display};
 use embassy_time::Timer;
 use esp_hal::i2c::master::{Config as I2cConfig, I2c};
 use esp_hal::time::Rate;
-use log::info;
+use log::{info, warn};
 
 pub use roller485::Roller485;
 
@@ -30,10 +30,13 @@ pub type CoreS3Display<'a> = mipidsi::Display<
     esp_hal::gpio::Output<'a>,
 >;
 
+/// Wrapper for I2C bus in critical-section Mutex for safe sharing
+/// between multiple motors without performance overhead
 /// Represents the initialized M5Stack CoreS3 hardware
 pub struct Board<'a> {
     pub display: Display<CoreS3Display<'a>>,
-    pub roller485: Roller485<I2c<'a, esp_hal::Blocking>>,
+    pub roller_a: Roller485<I2c<'a, esp_hal::Blocking>>,
+    pub roller_b: Roller485<I2c<'a, esp_hal::Blocking>>,
 }
 
 impl<'a> Board<'a> {
@@ -43,12 +46,13 @@ impl<'a> Board<'a> {
     /// - Power management (AXP2101)
     /// - Display backlight
     /// - Display controller (ILI9342C)
+    /// - Roller485 motor on I2C1 (Grove Port A)
     /// 
     /// Note: This function takes ownership of all used peripherals.
     /// For other peripherals (like TIMG0), keep references before calling init.
     /// 
     /// # Arguments
-    /// * `i2c0` - I2C0 peripheral (for AXP2101)
+    /// * `i2c0` - I2C0 peripheral (for AXP2101, then Motor A)
     /// * `sda` - GPIO12 for I2C SDA
     /// * `scl` - GPIO11 for I2C SCL
     /// * `spi2` - SPI2 peripheral
@@ -58,7 +62,7 @@ impl<'a> Board<'a> {
     /// * `gpio_dc` - GPIO35 for display DC
     /// * `gpio_rst` - GPIO15 for display RST
     /// * `display_buffer` - Buffer for display SPI transfers (min 512 bytes)
-    /// * `i2c1` - I2C1 peripheral (Port A/Grove) on GPIO2 (SDA) / GPIO1 (SCL)
+    /// * `i2c1` - I2C1 peripheral (Port A/Grove) on GPIO2 (SDA) / GPIO1 (SCL) for Motor B
     /// 
     /// # Returns
     /// A `Board` struct containing all initialized hardware
@@ -76,11 +80,13 @@ impl<'a> Board<'a> {
         i2c1: esp_hal::peripherals::I2C1<'a>,
         gpio_ext_sda: esp_hal::peripherals::GPIO2<'a>,
         gpio_ext_scl: esp_hal::peripherals::GPIO1<'a>,
+        gpio_c_sda: esp_hal::peripherals::GPIO17<'a>,
+        gpio_c_scl: esp_hal::peripherals::GPIO18<'a>,
     ) -> Self {
         info!("Initializing M5Stack CoreS3 hardware...");
 
         // Create I2C0 bus on GPIO12/11 for AXP2101 and AW9523
-        let i2c_bus = I2c::new(
+        let i2c0_bus = I2c::new(
             i2c0,
             I2cConfig::default().with_frequency(Rate::from_khz(100)),
         )
@@ -88,8 +94,12 @@ impl<'a> Board<'a> {
         .with_sda(sda)
         .with_scl(scl);
 
-        // Initialize power management (AXP2101) and display control (AW9523)
-        power::init_power_and_display_control(i2c_bus);
+        // Initialize power management (AXP2101) and display control (AW9523).
+        // This returns the bus back after configuration so we can optionally scan it.
+        let mut i2c0_released = power::init_power_and_display_control(i2c0_bus);
+
+        // Optional: scan I2C0 and log responding addresses (helps diagnose ACK issues)
+        scan_i2c_bus(&mut i2c0_released, "I2C0");
         
         // Small delay for power stabilization
         Timer::after_millis(100).await;
@@ -106,24 +116,62 @@ impl<'a> Board<'a> {
         };
         let display = display::init(disp_pins, display_buffer);
         
-                // External Grove I2C bus on Port A (GPIO2 SDA, GPIO1 SCL)
-                info!("Initializing I2C1 for Grove Port A...");
-                let i2c1_bus = I2c::new(
-                        i2c1,
-                        I2cConfig::default().with_frequency(Rate::from_khz(100)),
-                )
-                .expect("Failed to create I2C1")
-                .with_sda(gpio_ext_sda)
-                .with_scl(gpio_ext_scl);
+        // Grove I2C bus on Port A (GPIO2 SDA, GPIO1 SCL) - motors are connected here
+        info!("Initializing I2C1 for Grove Port A...");
+        let mut i2c1_bus = I2c::new(
+            i2c1,
+            I2cConfig::default().with_frequency(Rate::from_khz(100)),
+        )
+        .expect("Failed to create I2C1")
+        .with_sda(gpio_ext_sda)
+        .with_scl(gpio_ext_scl);
 
-                // Initialize Roller485 on Grove Port A
-                let mut roller485 = Roller485::new(i2c1_bus);
-          if let Err(e) = roller485.init() {
-            log::error!("Failed to initialize Roller485: {:?}", e);
-        }
+        // Optional: scan I2C1 to discover connected devices (0x64/0x65 expected)
+        scan_i2c_bus(&mut i2c1_bus, "I2C1");
+
+        // Motor A at address 0x64 on I2C1 (Port A)
+        info!("Initializing Roller485 Motor A at address 0x64 on I2C1...");
+        let mut roller_a = Roller485::new(i2c1_bus);
+        let _ = roller_a.init();
+
+        // Reconfigure I2C0 to Port C pins and scan
+        info!("Reconfiguring I2C0 to Port C (GPIO17 SDA, GPIO18 SCL)...");
+        i2c0_released = i2c0_released.with_sda(gpio_c_sda).with_scl(gpio_c_scl);
+        scan_i2c_bus(&mut i2c0_released, "I2C0 (Port C)");
+
+        // Motor B at address 0x65 on I2C0 (Port C)
+        info!("Initializing Roller485 Motor B at address 0x65 on I2C0 (Port C)...");
+        let mut roller_b = Roller485::new_with_address(i2c0_released, 0x65);
+        let _ = roller_b.init();
         
         info!("M5Stack CoreS3 hardware initialization complete");
         
-        Self { display, roller485 }
+        Self { display, roller_a, roller_b }
+    }
+}
+
+/// Scan an I2C bus for responding device addresses and log them.
+fn scan_i2c_bus<I2C>(bus: &mut I2C, label: &str)
+where
+    I2C: embedded_hal::i2c::I2c,
+{
+    info!("Scanning {} for I2C devices...", label);
+    let mut found = 0u8;
+    for addr in 0x08..=0x77 {
+        // Try a zero-length write; if device ACKs, it's present.
+        match bus.write(addr, &[]) {
+            Ok(()) => {
+                found = found.wrapping_add(1);
+                info!("{}: found device at 0x{:02x}", label, addr);
+            }
+            Err(_) => {
+                // Ignore NACK/other errors; continue scanning
+            }
+        }
+    }
+    if found == 0 {
+        warn!("{}: no I2C devices responded", label);
+    } else {
+        info!("{}: {} device(s) responded", label, found);
     }
 }

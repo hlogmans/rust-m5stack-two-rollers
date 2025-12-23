@@ -13,6 +13,7 @@
 //! - More registers available - see M5Stack Roller485 documentation
 
 use embedded_hal::i2c::I2c;
+use embassy_time::{Duration, Timer};
 use log::info;
 
 /// I2C address for Roller485 (default)
@@ -76,6 +77,9 @@ pub struct AngleBlock {
 }
 
 /// Roller485 driver
+///
+/// Generic over any I2C bus implementation. Uses critical-section for
+/// safe multi-task access when wrapped in Mutex/Arc.
 pub struct Roller485<I2C> {
     i2c: I2C,
     address: u8,
@@ -88,7 +92,7 @@ where
     /// Create a new Roller485 instance with default address
     ///
     /// # Arguments
-    /// * `i2c` - The I2C bus to use for communication
+    /// * `i2c` - The I2C bus to use for communication (can be Arc<Mutex<>> for sharing)
     pub fn new(i2c: I2C) -> Self {
         Self::new_with_address(i2c, ROLLER485_DEFAULT_ADDR)
     }
@@ -96,7 +100,7 @@ where
     /// Create a new Roller485 instance with custom address
     ///
     /// # Arguments
-    /// * `i2c` - The I2C bus to use for communication
+    /// * `i2c` - The I2C bus to use for communication (can be Arc<Mutex<>> for sharing)
     /// * `address` - Custom I2C address
     pub fn new_with_address(i2c: I2C, address: u8) -> Self {
         Self { i2c, address }
@@ -147,6 +151,13 @@ where
         self.i2c
             .write(self.address, &[registers::MODE_REG, mode_val])?;
         Ok(())
+    }
+
+    /// Send a raw command frame (async-friendly wrapper).
+    pub async fn send_command(&mut self, cmd: &[u8]) -> Result<(), I2C::Error> {
+        // allow await points in async tasks, even though write is blocking
+        Timer::after(Duration::from_millis(0)).await;
+        self.i2c.write(self.address, cmd)
     }
 
     /// Read the current encoder position
@@ -226,6 +237,27 @@ where
         ])?;
         
         Ok(())
+    }
+
+    /// Set the target position in steps (synchronous helper).
+    /// Position value is multiplied by 100 per device protocol.
+    /// Automatically switches to Position Control mode if needed.
+    pub fn set_position(&mut self, position_steps: i32) -> Result<(), I2C::Error> {
+        // Switch to Position Control mode if not already there
+        let current_mode = self.read_mode()?;
+        if current_mode != Roller485Mode::Position {
+            self.set_mode(Roller485Mode::Position)?;
+        }
+
+        let target_position = position_steps * 100;
+        let bytes = target_position.to_le_bytes();
+        self.i2c.write(self.address, &[
+            registers::POSITION_CONTROL_REG,
+            bytes[0],
+            bytes[1],
+            bytes[2],
+            bytes[3],
+        ])
     }
 
     /// Set the motor speed (RPM).

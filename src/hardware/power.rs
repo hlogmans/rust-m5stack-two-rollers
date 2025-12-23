@@ -26,14 +26,18 @@ use log::{info, error};
 
 /// Initialize power management, GPIO expander, display, and Grove port power
 ///
+/// Returns the released I2C bus so it can be reused (e.g. for a motor).
+/// AW9523 keeps its configuration after init, so we can release the bus.
+///
 /// This function implements the M5Stack CoreS3 power initialization sequence:
 /// 1. Initialize AXP2101 PMU (power management unit)
 /// 2. Release I2C bus from AXP2101  
 /// 3. Initialize AW9523 I/O expander (LCD control + Grove port power)
+/// 4. Release I2C bus from AW9523
 ///
 /// # Arguments
 /// * `i2c_bus` - I2C bus on GPIO12/11 (any lifetime)
-pub fn init_power_and_display_control<'a>(i2c_bus: I2c<'a, esp_hal::Blocking>) {
+pub fn init_power_and_display_control<'a>(i2c_bus: I2c<'a, esp_hal::Blocking>) -> I2c<'a, esp_hal::Blocking> {
     info!("Initializing AXP2101 PMU...");
     
     // Initialize AXP2101 with interface wrapper
@@ -64,5 +68,9 @@ pub fn init_power_and_display_control<'a>(i2c_bus: I2c<'a, esp_hal::Blocking>) {
         Err(e) => error!("AW9523 initialization failed: {:?}", e),
     }
     
+    // Release the bus from AW9523 so it can be reused elsewhere
+    let i2c_bus = aw.release_i2c().release_i2c();
+    
     info!("Power and display control initialization complete");
+    i2c_bus
 }
