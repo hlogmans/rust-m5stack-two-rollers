@@ -3,7 +3,7 @@ debug/
 target/
 
 # Local crate dependencies
-local_aw9523/
+# local_aw9523/
 
 # Editor configuration
 .vscode/
