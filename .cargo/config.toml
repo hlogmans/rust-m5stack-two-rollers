@@ -3,6 +3,7 @@ runner = "espflash flash --monitor --chip esp32s3"
 
 [env]
 ESP_LOG="info"
+ESPFLASH_PORT = "/dev/cu.usbmodem212201"
 
 [build]
 rustflags = [

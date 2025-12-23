@@ -12,8 +12,10 @@ use embassy_time::{Duration, Timer};
 use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
 use log::info;
-use m5_minimal::display;
-use axp2101_dd::Axp2101Async;
+use m5_minimal::{
+    business::{AngleController, Evaluator, ThresholdEvaluator},
+    hardware::Board,
+};
 
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo) -> ! {
@@ -41,68 +43,61 @@ async fn main(spawner: Spawner) -> ! {
 
     esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 73744);
 
+    info!("Embassy initialized!");
+
+    // Start embassy executor timer FIRST - needed for any async operations
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     esp_rtos::start(timg0.timer0);
 
-    info!("Embassy initialized!");
-
-    // Initialize power management (AXP2101) and enable backlight
-    info!("Creating shared I2C bus on GPIO12 (SDA) and GPIO11 (SCL)...");
-    let i2c_bus = esp_hal::i2c::master::I2c::new(
+    // Initialize all M5Stack CoreS3 hardware (power, display, etc.)
+    let mut display_buffer = [0_u8; 512];
+    let board = Board::init(
         peripherals.I2C0,
-        esp_hal::i2c::master::Config::default()
-            .with_frequency(esp_hal::time::Rate::from_hz(400_000)),
+        peripherals.GPIO12,
+        peripherals.GPIO11,
+        peripherals.SPI2,
+        peripherals.GPIO37,
+        peripherals.GPIO36,
+        peripherals.GPIO3,
+        peripherals.GPIO35,
+        peripherals.GPIO15,
+        &mut display_buffer,
     )
-    .expect("Failed to create I2C")
-    .with_sda(peripherals.GPIO12)
-    .with_scl(peripherals.GPIO11)
-    .into_async();
-    
-    info!("Initializing AXP2101 power management IC...");
-    let mut axp = Axp2101Async::new(i2c_bus);
-    
-    info!("Enabling display backlight via DLDO1...");
-    // Enable DLDO1 to 3.3V for display backlight
-    match axp.set_ldo_voltage_mv(axp2101_dd::LdoId::Dldo1, 3300).await {
-        Ok(_) => info!("DLDO1 voltage set to 3.3V"),
-        Err(e) => {
-            log::error!("Failed to set DLDO1 voltage: {:?}", e);
-            info!("Continuing anyway...");
-        }
-    }
-    Timer::after_millis(10).await;
-    
-    match axp.set_ldo_enable(axp2101_dd::LdoId::Dldo1, true).await {
-        Ok(_) => info!("DLDO1 enabled"),
-        Err(e) => {
-            log::error!("Failed to enable DLDO1: {:?}", e);
-            info!("Continuing anyway...");
-        }
-    }
-    Timer::after_millis(100).await;
-    info!("Backlight initialization complete");
+    .await;
 
-    // Initialize display with direct GPIO pins (based on esp-bsp)
-    let mut buffer = [0_u8; 512];
-    let disp_pins = display::DisplayPeripherals {
-        spi2: peripherals.SPI2,
-        gpio_mosi: peripherals.GPIO37,
-        gpio_sck: peripherals.GPIO36,
-        gpio_cs: peripherals.GPIO3,
-        gpio_dc: peripherals.GPIO35,
-        gpio_rst: peripherals.GPIO15,
-    };
-    let mut display = display::init(disp_pins, &mut buffer);
+    // Application logic starts here - hardware is fully initialized
+    let mut display = board.display;
     
-    display.clear_color(display::colors::green());
-    info!("Display initialized and set to red");
+    // Initialize display with circles (once)
+    display.init_angle_display();
+    info!("Board ready!");
+
+    // Create angle controller for business logic
+    let mut angle_controller = AngleController::new(1); // increment by 1 degree
+
+    // Create evaluator: < 100 = green, > 300 = red, otherwise yellow
+    let evaluator = ThresholdEvaluator::new(100, 300);
 
     // TODO: Spawn some tasks
     let _ = spawner;
 
+    // Main application loop - slowly increment angle and display
     loop {
-        info!("Hello world!");
-        Timer::after(Duration::from_secs(1)).await;
+        // Update business logic
+        angle_controller.update();
+        let current_angle = angle_controller.angle();
+        
+        // Evaluate the angle and get the corresponding color
+        let status = evaluator.evaluate(current_angle);
+        let color = status.to_color();
+        
+        // Update only the text with evaluated color (efficient, no flicker)
+        display.update_angle_text(current_angle, color);
+        
+        info!("Angle: {}° - Status: {:?}", current_angle, status);
+        
+        // Wait 50ms for smooth animation (20 updates/second)
+        Timer::after(Duration::from_millis(50)).await;
     }
 
     // for inspiration have a look at the examples at https://github.com/esp-rs/esp-hal/tree/esp-hal-v~1.0/examples

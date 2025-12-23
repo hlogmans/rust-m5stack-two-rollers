@@ -16,7 +16,9 @@
 
 use embedded_graphics::pixelcolor::Rgb565;
 use embedded_graphics::prelude::*;
-use embedded_graphics::primitives::{PrimitiveStyle, Rectangle};
+use embedded_graphics::primitives::{Circle, PrimitiveStyle, PrimitiveStyleBuilder, Rectangle};
+use embedded_graphics::mono_font::{ascii::FONT_10X20, MonoTextStyle};
+use embedded_graphics::text::{Alignment, Text};
 use embedded_hal_bus::spi::ExclusiveDevice;
 use esp_hal::delay::Delay;
 use esp_hal::gpio::{Level, Output, OutputConfig};
@@ -25,6 +27,7 @@ use esp_hal::spi::Mode;
 use esp_hal::time::Rate;
 use mipidsi::interface::SpiInterface;
 use mipidsi::{models::ILI9342CRgb565, Builder};
+use core::fmt::Write;
 
 // M5CoreS3 display dimensions
 pub const W: i32 = 320;
@@ -46,7 +49,13 @@ pub struct DisplayPeripherals<'a> {
 pub fn init<'a>(
     pins: DisplayPeripherals<'a>,
     buffer: &'a mut [u8; 512],
-) -> Display<impl DrawTarget<Color = Rgb565> + 'a> {
+) -> Display<
+    mipidsi::Display<
+        SpiInterface<'a, ExclusiveDevice<Spi<'a, esp_hal::Blocking>, Output<'a>, embedded_hal_bus::spi::NoDelay>, Output<'a>>,
+        ILI9342CRgb565,
+        Output<'a>,
+    >,
+> {
     log::info!("Initializing SPI...");
     let spi = Spi::new(
         pins.spi2,
@@ -97,6 +106,87 @@ impl<D: DrawTarget<Color = Rgb565>> Display<D> {
             .draw(&mut self.inner);
     }
 
+    /// Draw a circle with a stroke at the specified position
+    ///
+    /// # Arguments
+    /// * `center` - The center point of the circle
+    /// * `diameter` - The diameter of the circle
+    /// * `stroke_color` - The color of the circle stroke
+    /// * `stroke_width` - The width of the stroke
+    pub fn draw_circle(&mut self, center: Point, diameter: u32, stroke_color: Rgb565, stroke_width: u32) {
+        let style = PrimitiveStyleBuilder::new()
+            .stroke_color(stroke_color)
+            .stroke_width(stroke_width)
+            .build();
+        
+        let _ = Circle::new(
+            Point::new(center.x - diameter as i32 / 2, center.y - diameter as i32 / 2),
+            diameter,
+        )
+        .into_styled(style)
+        .draw(&mut self.inner);
+    }
+
+    /// Draw centered text at the specified position
+    ///
+    /// # Arguments
+    /// * `text` - The text to display
+    /// * `position` - The center position for the text
+    /// * `color` - The text color
+    pub fn draw_centered_text(&mut self, text: &str, position: Point, color: Rgb565) {
+        let style = MonoTextStyle::new(&FONT_10X20, color);
+        
+        let _ = Text::with_alignment(
+            text,
+            position,
+            style,
+            Alignment::Center,
+        )
+        .draw(&mut self.inner);
+    }
+
+    /// Initialize the angle display: draw the background and circles once
+    ///
+    /// Call this once at startup before calling update_angle_text
+    pub fn init_angle_display(&mut self) {
+        // Clear screen to black
+        self.clear_color(colors::black());
+        
+        // Calculate center of screen
+        let center = Point::new(W / 2, H / 2);
+        
+        // Draw outer circle (diameter: 180 pixels)
+        self.draw_circle(center, 180, colors::cyan(), 4);
+        
+        // Draw inner circle (diameter: 140 pixels)
+        self.draw_circle(center, 140, colors::blue(), 2);
+    }
+
+    /// Update only the angle text in the center (efficient, no flicker)
+    ///
+    /// # Arguments
+    /// * `angle` - The angle value to display (0-360)
+    /// * `color` - The color to use for the text
+    pub fn update_angle_text(&mut self, angle: u16, color: Rgb565) {
+        // Calculate center of screen
+        let center = Point::new(W / 2, H / 2);
+        
+        // Clear text area with a black rectangle (60x30 pixels)
+        let text_area = Rectangle::new(
+            Point::new(center.x - 30, center.y - 15),
+            Size::new(60, 30),
+        );
+        let _ = text_area.into_styled(PrimitiveStyle::with_fill(colors::black()))
+            .draw(&mut self.inner);
+        
+        // Format angle text
+        let mut buffer = heapless::String::<8>::new();
+        let _ = write!(buffer, "{}°", angle);
+        
+        // Draw the angle value centered with the specified color
+        self.draw_centered_text(&buffer, center, color);
+    }
+
     /// Expose screen size for convenience.
     pub fn size(&self) -> (i32, i32) {
         (W, H)
@@ -126,5 +216,9 @@ pub mod colors {
 
     pub fn black() -> Rgb565 {
         Rgb565::BLACK
+    }
+
+    pub fn cyan() -> Rgb565 {
+        Rgb565::CYAN
     }
 }

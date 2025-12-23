@@ -1216,6 +1216,7 @@ dependencies = [
  "esp-hal",
  "esp-println",
  "esp-rtos",
+ "heapless",
  "log",
  "mipidsi",
  "static_cell",
