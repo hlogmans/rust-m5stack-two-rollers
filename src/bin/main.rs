@@ -85,20 +85,22 @@ async fn main(spawner: Spawner) -> ! {
     let motor_a = board.roller_a;
     let motor_b = board.roller_b;
 
-    // Poll A's encoder; have B follow A's position each second
+    // Poll A's encoder; have B follow A's position
     spawner.must_spawn(run_motor_a_poll(motor_a));
     spawner.must_spawn(run_motor_b_follow(motor_b));
+    
+    info!("Motor A on I2C1 Port A, Motor B on I2C0 Port C - Touch temporarily disabled");
 
     // Idle loop
     loop {
         Timer::after(Duration::from_secs(1)).await;
     }
 }
+
 /// Task: Motor B follows Motor A's encoder position once per second
 #[embassy_executor::task]
 async fn run_motor_b_follow(mut motor: m5_minimal::hardware::Roller485<esp_hal::i2c::master::I2c<'static, esp_hal::Blocking>>) {
     info!("Motor B FOLLOW: start (I2C0 Port C, addr=0x65)");
-
     // Ensure position control is available when setting position
     let _ = motor.set_speed(1);
 

@@ -77,11 +77,10 @@ pub struct AngleBlock {
 }
 
 /// Roller485 driver
-///
 /// Generic over any I2C bus implementation. Uses critical-section for
 /// safe multi-task access when wrapped in Mutex/Arc.
 pub struct Roller485<I2C> {
-    i2c: I2C,
+    pub i2c: I2C,
     address: u8,
 }
 

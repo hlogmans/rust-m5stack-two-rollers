@@ -6,6 +6,7 @@
 
 pub mod power;
 pub mod roller485;
+pub mod touch;
 
 use crate::display::{self, Display};
 use embassy_time::Timer;
@@ -14,6 +15,7 @@ use esp_hal::time::Rate;
 use log::{info, warn};
 
 pub use roller485::Roller485;
+pub use touch::{FT6336, TouchEvent, TouchPoint, read_touch_data};
 
 /// Type alias for the display driver used on M5Stack CoreS3
 pub type CoreS3Display<'a> = mipidsi::Display<
@@ -30,8 +32,6 @@ pub type CoreS3Display<'a> = mipidsi::Display<
     esp_hal::gpio::Output<'a>,
 >;
 
-/// Wrapper for I2C bus in critical-section Mutex for safe sharing
-/// between multiple motors without performance overhead
 /// Represents the initialized M5Stack CoreS3 hardware
 pub struct Board<'a> {
     pub display: Display<CoreS3Display<'a>>,
@@ -80,8 +80,8 @@ impl<'a> Board<'a> {
         i2c1: esp_hal::peripherals::I2C1<'a>,
         gpio_ext_sda: esp_hal::peripherals::GPIO2<'a>,
         gpio_ext_scl: esp_hal::peripherals::GPIO1<'a>,
-        gpio_c_sda: esp_hal::peripherals::GPIO17<'a>,
-        gpio_c_scl: esp_hal::peripherals::GPIO18<'a>,
+        gpio_port_c_sda: esp_hal::peripherals::GPIO17<'a>,
+        gpio_port_c_scl: esp_hal::peripherals::GPIO18<'a>,
     ) -> Self {
         info!("Initializing M5Stack CoreS3 hardware...");
 
@@ -116,8 +116,8 @@ impl<'a> Board<'a> {
         };
         let display = display::init(disp_pins, display_buffer);
         
-        // Grove I2C bus on Port A (GPIO2 SDA, GPIO1 SCL) - motors are connected here
-        info!("Initializing I2C1 for Grove Port A...");
+        // Grove I2C bus on Port A (GPIO2 SDA, GPIO1 SCL) - Motor A only
+        info!("Initializing I2C1 for Grove Port A (Motor A)...");
         let mut i2c1_bus = I2c::new(
             i2c1,
             I2cConfig::default().with_frequency(Rate::from_khz(400)),
@@ -126,23 +126,28 @@ impl<'a> Board<'a> {
         .with_sda(gpio_ext_sda)
         .with_scl(gpio_ext_scl);
 
-        // Optional: scan I2C1 to discover connected devices (0x64/0x65 expected)
-        scan_i2c_bus(&mut i2c1_bus, "I2C1");
+        scan_i2c_bus(&mut i2c1_bus, "I2C1 Port A");
 
         // Motor A at address 0x64 on I2C1 (Port A)
-        info!("Initializing Roller485 Motor A at address 0x64 on I2C1...");
+        info!("Initializing Roller485 Motor A at address 0x64 on I2C1 Port A...");
         let mut roller_a = Roller485::new(i2c1_bus);
         let _ = roller_a.init();
 
-        // Reconfigure I2C0 to Port C pins and scan
-        info!("Reconfiguring I2C0 to Port C (GPIO17 SDA, GPIO18 SCL)...");
-        i2c0_released = i2c0_released.with_sda(gpio_c_sda).with_scl(gpio_c_scl);
-        scan_i2c_bus(&mut i2c0_released, "I2C0 (Port C)");
+        // For now, Motor B uses the released I2C0 bus (Port C pins)
+        // This separates it from touch controller which would use I2C0 on GPIO12/11
+        info!("Initializing Motor B on released I2C0 instance (temporary solution)...");
+        let mut i2c0_motor_b = i2c0_released
+            .with_sda(gpio_port_c_sda)
+            .with_scl(gpio_port_c_scl);
+        
+        scan_i2c_bus(&mut i2c0_motor_b, "I2C0 Port C (Motor B)");
 
-        // Motor B at address 0x65 on I2C0 (Port C)
-        info!("Initializing Roller485 Motor B at address 0x65 on I2C0 (Port C)...");
-        let mut roller_b = Roller485::new_with_address(i2c0_released, 0x65);
+        // Motor B at address 0x65
+        info!("Initializing Roller485 Motor B at address 0x65...");
+        let mut roller_b = Roller485::new_with_address(i2c0_motor_b, 0x65);
         let _ = roller_b.init();
+        
+        info!("NOTE: Touch currently disabled - needs separate I2C instance");
         
         info!("M5Stack CoreS3 hardware initialization complete");
         
