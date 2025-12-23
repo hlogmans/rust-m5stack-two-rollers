@@ -63,8 +63,8 @@ async fn main(spawner: Spawner) -> ! {
             peripherals.GPIO15,
             &mut display_buffer,
             peripherals.I2C1,
-            peripherals.GPIO17,
-            peripherals.GPIO18,
+            peripherals.GPIO2,
+            peripherals.GPIO1,
         )
         .await;
 

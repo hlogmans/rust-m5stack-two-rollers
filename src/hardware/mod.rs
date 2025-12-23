@@ -58,9 +58,7 @@ impl<'a> Board<'a> {
     /// * `gpio_dc` - GPIO35 for display DC
     /// * `gpio_rst` - GPIO15 for display RST
     /// * `display_buffer` - Buffer for display SPI transfers (min 512 bytes)
-    /// * `i2c1` - I2C1 peripheral (for PORT.C)
-    /// * `port_c_sda` - GPIO13 for PORT.C SDA
-    /// * `port_c_scl` - GPIO14 for PORT.C SCL
+    /// * `i2c1` - I2C1 peripheral (Port A/Grove) on GPIO2 (SDA) / GPIO1 (SCL)
     /// 
     /// # Returns
     /// A `Board` struct containing all initialized hardware
@@ -76,13 +74,22 @@ impl<'a> Board<'a> {
         gpio_rst: esp_hal::peripherals::GPIO15<'a>,
         display_buffer: &'a mut [u8; 512],
         i2c1: esp_hal::peripherals::I2C1<'a>,
-        port_c_sda: esp_hal::peripherals::GPIO17<'a>,
-        port_c_scl: esp_hal::peripherals::GPIO18<'a>,
+        gpio_ext_sda: esp_hal::peripherals::GPIO2<'a>,
+        gpio_ext_scl: esp_hal::peripherals::GPIO1<'a>,
     ) -> Self {
         info!("Initializing M5Stack CoreS3 hardware...");
-        
-        // Initialize power management and backlight
-        power::init_power_and_backlight(i2c0, sda, scl).await;
+
+        // Create I2C0 bus on GPIO12/11 for AXP2101 and AW9523
+        let i2c_bus = I2c::new(
+            i2c0,
+            I2cConfig::default().with_frequency(Rate::from_khz(100)),
+        )
+        .expect("Failed to create I2C0")
+        .with_sda(sda)
+        .with_scl(scl);
+
+        // Initialize power management (AXP2101) and display control (AW9523)
+        power::init_power_and_display_control(i2c_bus);
         
         // Small delay for power stabilization
         Timer::after_millis(100).await;
@@ -99,19 +106,18 @@ impl<'a> Board<'a> {
         };
         let display = display::init(disp_pins, display_buffer);
         
-        // Initialize I2C1 for PORT.C (Roller485)
-        // Using 100kHz for better stability with Roller485
-        info!("Initializing I2C1 for PORT.C...");
-            let i2c1_bus = I2c::new(
-                i2c1,
-                I2cConfig::default().with_frequency(Rate::from_khz(100)),
-            )
-            .expect("Failed to create I2C1")
-            .with_sda(port_c_sda)
-            .with_scl(port_c_scl);
-        
-        // Initialize Roller485
-        let mut roller485 = Roller485::new(i2c1_bus);
+                // External Grove I2C bus on Port A (GPIO2 SDA, GPIO1 SCL)
+                info!("Initializing I2C1 for Grove Port A...");
+                let i2c1_bus = I2c::new(
+                        i2c1,
+                        I2cConfig::default().with_frequency(Rate::from_khz(100)),
+                )
+                .expect("Failed to create I2C1")
+                .with_sda(gpio_ext_sda)
+                .with_scl(gpio_ext_scl);
+
+                // Initialize Roller485 on Grove Port A
+                let mut roller485 = Roller485::new(i2c1_bus);
           if let Err(e) = roller485.init() {
             log::error!("Failed to initialize Roller485: {:?}", e);
         }

@@ -71,14 +71,20 @@ pub fn init<'a>(
     let cs = Output::new(pins.gpio_cs, Level::High, OutputConfig::default());
     let spi_device = ExclusiveDevice::new_no_delay(spi, cs).expect("Failed to create SPI device");
 
-    let dc = Output::new(pins.gpio_dc, Level::Low, OutputConfig::default());
-    let rst = Output::new(pins.gpio_rst, Level::Low, OutputConfig::default());
+    // Prepare reset pin and force a clean reset after PMU init
+    let mut rst = Output::new(pins.gpio_rst, Level::Low, OutputConfig::default());
+    let mut delay = Delay::new();
+    log::info!("Forcing LCD reset (LOW 20ms -> HIGH 120ms)...");
+    rst.set_low();
+    delay.delay_millis(20);
+    rst.set_high();
+    delay.delay_millis(120);
 
+    // DC pin and display interface
+    let dc = Output::new(pins.gpio_dc, Level::Low, OutputConfig::default());
     // The display interface uses the provided temporary buffer for transfers.
     log::info!("Creating display interface...");
     let di = SpiInterface::new(spi_device, dc, buffer);
-
-    let mut delay = Delay::new();
 
     log::info!("Initializing ILI9342C display controller...");
     let display = Builder::new(ILI9342CRgb565, di)
