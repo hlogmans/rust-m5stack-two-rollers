@@ -96,12 +96,21 @@ pub fn init<'a>(
 
     log::info!("Display initialization complete");
     // Wrap in our high-level Display facade
-    Display { inner: display }
+    Display {
+        inner: display,
+        last_center_angle: None,
+        last_a: None,
+        last_b: None,
+    }
 }
 
 /// Simple high-level facade hiding low-level embedded-graphics usage.
 pub struct Display<D: DrawTarget<Color = Rgb565>> {
     inner: D,
+    // Cached values to avoid unnecessary redraws/flicker
+    last_center_angle: Option<u16>,
+    last_a: Option<u16>,
+    last_b: Option<u16>,
 }
 
 impl<D: DrawTarget<Color = Rgb565>> Display<D> {
@@ -166,6 +175,11 @@ impl<D: DrawTarget<Color = Rgb565>> Display<D> {
         
         // Draw inner circle (diameter: 140 pixels)
         self.draw_circle(center, 140, colors::blue(), 2);
+
+        // Reset cached text values
+        self.last_center_angle = None;
+        self.last_a = None;
+        self.last_b = None;
     }
 
     /// Update only the angle text in the center (efficient, no flicker)
@@ -174,23 +188,28 @@ impl<D: DrawTarget<Color = Rgb565>> Display<D> {
     /// * `angle` - The angle value to display (0-360)
     /// * `color` - The color to use for the text
     pub fn update_angle_text(&mut self, angle: u16, color: Rgb565) {
+        // Skip if unchanged to prevent flicker
+        if self.last_center_angle == Some(angle) {
+            return;
+        }
         // Calculate center of screen
         let center = Point::new(W / 2, H / 2);
         
-        // Clear text area with a black rectangle (60x30 pixels)
-        let text_area = Rectangle::new(
-            Point::new(center.x - 30, center.y - 15),
-            Size::new(60, 30),
-        );
-        let _ = text_area.into_styled(PrimitiveStyle::with_fill(colors::black()))
-            .draw(&mut self.inner);
-        
-        // Format angle text
+        // Erase previous text by overdrawing it in black (glyph only)
+        if let Some(prev) = self.last_center_angle {
+            let mut prev_buf = heapless::String::<8>::new();
+            // Use plain number without unsupported degree symbol
+            let _ = write!(prev_buf, "{}", prev);
+            self.draw_centered_text(&prev_buf, center, colors::black());
+        }
+
+        // Draw the new angle value centered
         let mut buffer = heapless::String::<8>::new();
-        let _ = write!(buffer, "{}°", angle);
-        
-        // Draw the angle value centered with the specified color
+        let _ = write!(buffer, "{}", angle);
         self.draw_centered_text(&buffer, center, color);
+
+        // Update cache
+        self.last_center_angle = Some(angle);
     }
 
     /// Update two angle readouts labeled A and B
@@ -199,26 +218,40 @@ impl<D: DrawTarget<Color = Rgb565>> Display<D> {
     /// Clears only the small regions to avoid flicker.
     pub fn update_dual_angles(&mut self, angle_a: u16, angle_b: u16) {
         let center = Point::new(W / 2, H / 2);
-
-        // Areas for A (above center) and B (below center)
-        let area_a = Rectangle::new(Point::new(center.x - 70, center.y - 35), Size::new(140, 28));
-        let area_b = Rectangle::new(Point::new(center.x - 70, center.y + 7), Size::new(140, 28));
-
-        let _ = area_a.into_styled(PrimitiveStyle::with_fill(colors::black())).draw(&mut self.inner);
-        let _ = area_b.into_styled(PrimitiveStyle::with_fill(colors::black())).draw(&mut self.inner);
-
-        // Format strings
-        let mut buf_a = heapless::String::<16>::new();
-        let _ = write!(buf_a, "A: {}°", angle_a);
-        let mut buf_b = heapless::String::<16>::new();
-        let _ = write!(buf_b, "B: {}°", angle_b);
-
+        
         // Positions: slightly above/below center
         let pos_a = Point::new(center.x, center.y - 20);
         let pos_b = Point::new(center.x, center.y + 20);
 
-        self.draw_centered_text(&buf_a, pos_a, colors::white());
-        self.draw_centered_text(&buf_b, pos_b, colors::white());
+        // Skip redraws that haven't changed
+        let a_changed = self.last_a.map(|v| v != angle_a).unwrap_or(true);
+        let b_changed = self.last_b.map(|v| v != angle_b).unwrap_or(true);
+
+        // Erase previous A if changed
+        if a_changed {
+            if let Some(prev_a) = self.last_a {
+                let mut prev_buf_a = heapless::String::<16>::new();
+                let _ = write!(prev_buf_a, "A: {}", prev_a);
+                self.draw_centered_text(&prev_buf_a, pos_a, colors::black());
+            }
+            let mut buf_a = heapless::String::<16>::new();
+            let _ = write!(buf_a, "A: {}", angle_a);
+            self.draw_centered_text(&buf_a, pos_a, colors::white());
+            self.last_a = Some(angle_a);
+        }
+
+        // Erase previous B if changed
+        if b_changed {
+            if let Some(prev_b) = self.last_b {
+                let mut prev_buf_b = heapless::String::<16>::new();
+                let _ = write!(prev_buf_b, "B: {}", prev_b);
+                self.draw_centered_text(&prev_buf_b, pos_b, colors::black());
+            }
+            let mut buf_b = heapless::String::<16>::new();
+            let _ = write!(buf_b, "B: {}", angle_b);
+            self.draw_centered_text(&buf_b, pos_b, colors::white());
+            self.last_b = Some(angle_b);
+        }
     }
 
     /// Expose screen size for convenience.
