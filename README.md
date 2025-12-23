@@ -1,3 +1,7 @@
+M5STACK minimal example to connect to Roller485 devices and read their settings and have them interact with eachother.
+
+
+
 I2C data
 
 Internal SCL=11;SDA=12
