@@ -88,7 +88,7 @@ impl<'a> Board<'a> {
         // Create I2C0 bus on GPIO12/11 for AXP2101 and AW9523
         let i2c0_bus = I2c::new(
             i2c0,
-            I2cConfig::default().with_frequency(Rate::from_khz(100)),
+            I2cConfig::default().with_frequency(Rate::from_khz(400)),
         )
         .expect("Failed to create I2C0")
         .with_sda(sda)
@@ -120,7 +120,7 @@ impl<'a> Board<'a> {
         info!("Initializing I2C1 for Grove Port A...");
         let mut i2c1_bus = I2c::new(
             i2c1,
-            I2cConfig::default().with_frequency(Rate::from_khz(100)),
+            I2cConfig::default().with_frequency(Rate::from_khz(400)),
         )
         .expect("Failed to create I2C1")
         .with_sda(gpio_ext_sda)

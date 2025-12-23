@@ -21,6 +21,10 @@ use m5_minimal::display::Display;
 // Global channel to stream angle updates from motor task to display task
 static ANGLE_A_CH: Channel<CriticalSectionRawMutex, u16, 8> = Channel::new();
 static ANGLE_B_CH: Channel<CriticalSectionRawMutex, u16, 8> = Channel::new();
+// Steps channel: A's encoder position (steps, post /100 conversion)
+static A_STEPS_CH: Channel<CriticalSectionRawMutex, i32, 8> = Channel::new();
+// Offset channel: Motor B's initial offset relative to Motor A
+static OFFSET_CH: Channel<CriticalSectionRawMutex, i32, 1> = Channel::new();
 
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo) -> ! {
@@ -77,62 +81,106 @@ async fn main(spawner: Spawner) -> ! {
     let display = board.display;
     spawner.must_spawn(run_display(display));
 
-    // Move single motor into task (I2C1)
+    // Extract motors
     let motor_a = board.roller_a;
     let motor_b = board.roller_b;
 
-    spawner.must_spawn(run_motor_a(motor_a));
-    spawner.must_spawn(run_motor_b(motor_b));
+    // Poll A's encoder; have B follow A's position each second
+    spawner.must_spawn(run_motor_a_poll(motor_a));
+    spawner.must_spawn(run_motor_b_follow(motor_b));
 
     // Idle loop
     loop {
         Timer::after(Duration::from_secs(1)).await;
     }
 }
-/// Task: drive motor B on I2C0 (Port C GPIO17/18) at address 0x65
+/// Task: Motor B follows Motor A's encoder position once per second
 #[embassy_executor::task]
-async fn run_motor_b(mut motor: m5_minimal::hardware::Roller485<esp_hal::i2c::master::I2c<'static, esp_hal::Blocking>>) {
-    info!("Motor B: start (I2C0 Port C, addr=0x65)");
-    let mut angle: i32 = 180;
+async fn run_motor_b_follow(mut motor: m5_minimal::hardware::Roller485<esp_hal::i2c::master::I2c<'static, esp_hal::Blocking>>) {
+    info!("Motor B FOLLOW: start (I2C0 Port C, addr=0x65)");
 
-    // Set initial speed
-    let _ = motor.set_speed(30);
+    // Ensure position control is available when setting position
+    let _ = motor.set_speed(1);
+
+    let mut last_steps: i32 = 0;
+    let mut prev_logged_steps: i32 = i32::MIN;
+    let mut offset: i32 = 0;
+    let mut offset_synced = false;
+
+    // Read Motor B's current position to calculate offset on first run
+    if let Ok(b_steps) = motor.read_encoder_position() {
+        info!("Motor B initial position: {} steps", b_steps);
+    }
 
     loop {
-        // Step 45 degrees backward each 1.5s
-        angle = (angle + 315) % 360; // -45 modulo 360
-        let steps = (angle * 333 / 360) as i32;
-        if let Err(e) = motor.set_position(steps) {
-            warn!("Motor B position error: {:?}", e);
+        // Receive offset from A's task (only once at startup)
+        if !offset_synced {
+            if let Ok(a_offset) = OFFSET_CH.try_receive() {
+                // Calculate B's offset relative to A
+                if let Ok(b_steps) = motor.read_encoder_position() {
+                    offset = b_steps - a_offset;
+                    offset_synced = true;
+                    info!("Motor B offset calculated: {} (B={} - A={})", offset, b_steps, a_offset);
+                }
+            }
+        }
+
+        // Try to receive latest steps from A
+        if let Ok(steps) = A_STEPS_CH.try_receive() {
+            last_steps = steps;
+        }
+
+        // Apply A's last position to B, accounting for offset
+        let target_steps = last_steps + offset;
+        if let Err(e) = motor.set_position(target_steps) {
+            warn!("Motor B follow error: {:?}", e);
         } else {
-            info!("Motor B -> {}° (steps={})", angle, steps);
+            // Update display with an angle derived from steps
+            let angle = ((target_steps % 333 + 333) % 333) * 360 / 333;
+            if target_steps != prev_logged_steps {
+                info!("Motor B -> follow steps={} ({}°)", target_steps, angle);
+                prev_logged_steps = target_steps;
+            }
             let _ = ANGLE_B_CH.try_send(angle as u16);
         }
-        Timer::after(Duration::from_millis(1500)).await;
+
+        Timer::after(Duration::from_millis(25)).await;
     }
 }
 
-/// Task: drive motor A on I2C1 (Grove PORT.A GPIO2/1) at address 0x64
+/// Task: poll Motor A's encoder and publish steps and angle
 #[embassy_executor::task]
-async fn run_motor_a(mut motor: m5_minimal::hardware::Roller485<esp_hal::i2c::master::I2c<'static, esp_hal::Blocking>>) {
-    info!("Motor A: start (I2C1, addr=0x64)");
-    let mut angle: i32 = 0;
+async fn run_motor_a_poll(mut motor: m5_minimal::hardware::Roller485<esp_hal::i2c::master::I2c<'static, esp_hal::Blocking>>) {
+    info!("Motor A POLL: start (I2C1, addr=0x64)");
+    // Ensure encoder mode for stable reads
+    let _ = motor.ensure_encoder_mode();
 
-    // Set initial speed
-    let _ = motor.set_speed(20);
+    let mut prev_logged_steps: i32 = i32::MIN;
+    let mut offset_sent = false;
 
     loop {
-        // Step 30 degrees forward each 2s
-        angle = (angle + 30) % 360;
-        let steps = (angle * 333 / 360) as i32;
-        if let Err(e) = motor.set_position(steps) {
-            warn!("Motor A position error: {:?}", e);
-        } else {
-            info!("Motor A -> {}° (steps={})", angle, steps);
-            // Stream current angle to display task
-            let _ = ANGLE_A_CH.try_send(angle as u16);
+        match motor.read_encoder_position() {
+            Ok(steps) => {
+                // Send initial offset once for Motor B to sync
+                if !offset_sent {
+                    let _ = OFFSET_CH.try_send(steps);
+                    offset_sent = true;
+                    info!("Motor A initial offset sent: {} steps", steps);
+                }
+
+                // Publish steps for follower
+                let _ = A_STEPS_CH.try_send(steps);
+                // Also send angle to display
+                let angle = ((steps % 333 + 333) % 333) * 360 / 333;
+                let _ = ANGLE_A_CH.try_send(angle as u16);
+                if steps != prev_logged_steps {
+                    info!("Motor A steps={} ({}°)", steps, angle);
+                    prev_logged_steps = steps;
+                }
+            }
+            Err(e) => warn!("Motor A read error: {:?}", e),
         }
-        Timer::after(Duration::from_secs(2)).await;
+        Timer::after(Duration::from_millis(500)).await;
     }
 }
 
