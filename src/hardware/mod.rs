@@ -5,10 +5,15 @@
 //! is encapsulated here.
 
 pub mod power;
+pub mod roller485;
 
 use crate::display::{self, Display};
 use embassy_time::Timer;
+use esp_hal::i2c::master::{Config as I2cConfig, I2c};
+use esp_hal::time::Rate;
 use log::info;
+
+pub use roller485::Roller485;
 
 /// Type alias for the display driver used on M5Stack CoreS3
 pub type CoreS3Display<'a> = mipidsi::Display<
@@ -28,6 +33,7 @@ pub type CoreS3Display<'a> = mipidsi::Display<
 /// Represents the initialized M5Stack CoreS3 hardware
 pub struct Board<'a> {
     pub display: Display<CoreS3Display<'a>>,
+    pub roller485: Roller485<I2c<'a, esp_hal::Blocking>>,
 }
 
 impl<'a> Board<'a> {
@@ -52,6 +58,9 @@ impl<'a> Board<'a> {
     /// * `gpio_dc` - GPIO35 for display DC
     /// * `gpio_rst` - GPIO15 for display RST
     /// * `display_buffer` - Buffer for display SPI transfers (min 512 bytes)
+    /// * `i2c1` - I2C1 peripheral (for PORT.C)
+    /// * `port_c_sda` - GPIO13 for PORT.C SDA
+    /// * `port_c_scl` - GPIO14 for PORT.C SCL
     /// 
     /// # Returns
     /// A `Board` struct containing all initialized hardware
@@ -66,6 +75,9 @@ impl<'a> Board<'a> {
         gpio_dc: esp_hal::peripherals::GPIO35<'a>,
         gpio_rst: esp_hal::peripherals::GPIO15<'a>,
         display_buffer: &'a mut [u8; 512],
+        i2c1: esp_hal::peripherals::I2C1<'a>,
+        port_c_sda: esp_hal::peripherals::GPIO17<'a>,
+        port_c_scl: esp_hal::peripherals::GPIO18<'a>,
     ) -> Self {
         info!("Initializing M5Stack CoreS3 hardware...");
         
@@ -87,8 +99,25 @@ impl<'a> Board<'a> {
         };
         let display = display::init(disp_pins, display_buffer);
         
+        // Initialize I2C1 for PORT.C (Roller485)
+        // Using 100kHz for better stability with Roller485
+        info!("Initializing I2C1 for PORT.C...");
+            let i2c1_bus = I2c::new(
+                i2c1,
+                I2cConfig::default().with_frequency(Rate::from_khz(100)),
+            )
+            .expect("Failed to create I2C1")
+            .with_sda(port_c_sda)
+            .with_scl(port_c_scl);
+        
+        // Initialize Roller485
+        let mut roller485 = Roller485::new(i2c1_bus);
+          if let Err(e) = roller485.init() {
+            log::error!("Failed to initialize Roller485: {:?}", e);
+        }
+        
         info!("M5Stack CoreS3 hardware initialization complete");
         
-        Self { display }
+        Self { display, roller485 }
     }
 }

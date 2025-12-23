@@ -13,7 +13,7 @@ use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
 use log::info;
 use m5_minimal::{
-    business::{AngleController, Evaluator, ThresholdEvaluator},
+    business::{Evaluator, ThresholdEvaluator},
     hardware::Board,
 };
 
@@ -51,29 +51,30 @@ async fn main(spawner: Spawner) -> ! {
 
     // Initialize all M5Stack CoreS3 hardware (power, display, etc.)
     let mut display_buffer = [0_u8; 512];
-    let board = Board::init(
-        peripherals.I2C0,
-        peripherals.GPIO12,
-        peripherals.GPIO11,
-        peripherals.SPI2,
-        peripherals.GPIO37,
-        peripherals.GPIO36,
-        peripherals.GPIO3,
-        peripherals.GPIO35,
-        peripherals.GPIO15,
-        &mut display_buffer,
-    )
-    .await;
+        let board = Board::init(
+            peripherals.I2C0,
+            peripherals.GPIO12,
+            peripherals.GPIO11,
+            peripherals.SPI2,
+            peripherals.GPIO37,
+            peripherals.GPIO36,
+            peripherals.GPIO3,
+            peripherals.GPIO35,
+            peripherals.GPIO15,
+            &mut display_buffer,
+            peripherals.I2C1,
+            peripherals.GPIO17,
+            peripherals.GPIO18,
+        )
+        .await;
 
     // Application logic starts here - hardware is fully initialized
     let mut display = board.display;
+    let mut roller485 = board.roller485;
     
     // Initialize display with circles (once)
     display.init_angle_display();
     info!("Board ready!");
-
-    // Create angle controller for business logic
-    let mut angle_controller = AngleController::new(1); // increment by 1 degree
 
     // Create evaluator: < 100 = green, > 300 = red, otherwise yellow
     let evaluator = ThresholdEvaluator::new(100, 300);
@@ -81,22 +82,80 @@ async fn main(spawner: Spawner) -> ! {
     // TODO: Spawn some tasks
     let _ = spawner;
 
-    // Main application loop - slowly increment angle and display
+    let mut loop_counter: u32 = 0;
+    let mut last_valid_angle: u16 = 0;
+    let mut last_steps: Option<i32> = None;
+    let mut last_reported_angle: Option<u16> = None;
+
+        // Main application loop - read Roller485 angle and display
     loop {
-        // Update business logic
-        angle_controller.update();
-        let current_angle = angle_controller.angle();
+            // Read angle and detect zero-blocks (spurious reads)
+            let block = match roller485.read_angle_block() {
+                Ok(v) => v,
+                Err(e) => {
+                    log::error!("Failed to read Roller485: {:?}", e);
+                    Timer::after(Duration::from_millis(100)).await;
+                    continue;
+                }
+            };
+
+            // Ignore all-zero frames outright
+            if block.zero_block {
+                Timer::after(Duration::from_millis(50)).await;
+                continue;
+            }
+
+            // Calculate angle difference (accounting for wraparound)
+            let angle_diff = if last_valid_angle == 0 {
+                0 // First read
+            } else {
+                let diff = (block.angle_deg as i32 - last_valid_angle as i32).abs();
+                if diff > 180 {
+                    360 - diff
+                } else {
+                    diff
+                }
+            };
+
+            // Only accept new angles that are:
+            // 1. First reading (last_valid_angle == 0), OR
+            // 2. Within reasonable range (< 45° change), OR  
+            // 3. Steps changed significantly (actual movement)
+            let steps_changed = last_steps.map_or(true, |prev| (block.steps - prev).abs() > 10);
+            let angle_reasonable = angle_diff < 45;
+            
+            if last_valid_angle == 0 || angle_reasonable || steps_changed {
+                last_valid_angle = block.angle_deg;
+                last_steps = Some(block.steps);
+            }
+
+            let angle_to_use = last_valid_angle;
         
         // Evaluate the angle and get the corresponding color
-        let status = evaluator.evaluate(current_angle);
+        let status = evaluator.evaluate(angle_to_use);
         let color = status.to_color();
         
         // Update only the text with evaluated color (efficient, no flicker)
-        display.update_angle_text(current_angle, color);
+        display.update_angle_text(angle_to_use, color);
         
-        info!("Angle: {}° - Status: {:?}", current_angle, status);
+        if last_reported_angle != Some(angle_to_use) || loop_counter % 200 == 0 {
+            info!(
+                "Roller485 angle: {}° (steps={}) - Status: {:?}",
+                angle_to_use, block.steps, status
+            );
+            last_reported_angle = Some(angle_to_use);
+        }
+
+            // Slow down raw dumps to avoid log noise
+            loop_counter = loop_counter.wrapping_add(1);
+        if loop_counter % 400 == 0 {
+            let mut buf = [0u8; 8];
+            if let Ok(raw) = roller485.read_block(0x00, &mut buf) {
+                log::info!("Raw[0x00..]= {:02x?}", raw);
+            }
+            }
         
-        // Wait 50ms for smooth animation (20 updates/second)
+            // Wait 50ms for smooth updates (20 updates/second)
         Timer::after(Duration::from_millis(50)).await;
     }
 
