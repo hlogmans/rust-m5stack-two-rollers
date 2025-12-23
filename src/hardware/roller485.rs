@@ -18,14 +18,49 @@ use log::info;
 /// I2C address for Roller485 (default)
 pub const ROLLER485_DEFAULT_ADDR: u8 = 0x64;
 
-/// Register addresses for Roller485
+/// Register addresses for Roller485 (I2C Protocol)
+/// See: M5Stack Unit Roller485 I2C Protocol Documentation
 mod registers {
-    /// Motor position register (32-bit, little-endian)
-    pub const ENCODER_REG: u8 = 0x00;
-    /// Motor mode register
-    pub const MODE_REG: u8 = 0x10;
+    /// Motor Enable/Disable register (1 byte: 0x00=off, 0x01=on)
+    pub const MOTOR_ENABLE_REG: u8 = 0x00;
+    /// Motor mode setting (1 byte: 0x01=speed, 0x02=position, 0x03=current, 0x04=encoder)
+    pub const MODE_REG: u8 = 0x01;
+    /// Position Readback register (4 bytes, little-endian i32, divide by 100 for actual position)
+    pub const POSITION_READBACK_REG: u8 = 0x90;
     /// Motor speed register (16-bit)
     pub const SPEED_REG: u8 = 0x20;
+}
+
+/// Roller485 operational modes
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[repr(u8)]
+pub enum Roller485Mode {
+    /// Speed control mode
+    Speed = 0x01,
+    /// Position control mode
+    Position = 0x02,
+    /// Current control mode
+    Current = 0x03,
+    /// Encoder reading mode (for angle/position feedback)
+    Encoder = 0x04,
+}
+
+impl From<u8> for Roller485Mode {
+    fn from(val: u8) -> Self {
+        match val {
+            0x01 => Roller485Mode::Speed,
+            0x02 => Roller485Mode::Position,
+            0x03 => Roller485Mode::Current,
+            0x04 => Roller485Mode::Encoder,
+            _ => Roller485Mode::Encoder, // Default to Encoder for unknown modes
+        }
+    }
+}
+
+impl From<Roller485Mode> for u8 {
+    fn from(mode: Roller485Mode) -> u8 {
+        mode as u8
+    }
 }
 
 /// Parsed angle/position frame returned by the Roller485.
@@ -67,56 +102,104 @@ where
 
     /// Initialize the Roller485 device
     ///
-    /// Performs basic communication test and setup
-        pub fn init(&mut self) -> Result<(), I2C::Error> {
+    /// Performs basic communication test and setup.
+    /// Enables the motor and sets mode to ENCODER for angle reading.
+    pub fn init(&mut self) -> Result<(), I2C::Error> {
         info!("Initializing Roller485 at address 0x{:02x}", self.address);
         
+        // Step 1: Enable the motor (0x00 = 0x01)
+        self.i2c
+            .write(self.address, &[registers::MOTOR_ENABLE_REG, 0x01])?;
+        info!("Roller485 motor enabled");
+        
+        // Step 2: Set mode to ENCODER (0x01 = 0x04)
+        self.set_mode(Roller485Mode::Encoder)?;
+        
+        // Verify mode was set
+        let mode = self.read_mode()?;
+        info!("Roller485 mode set to: {:?}", mode);
+        
         // Try reading encoder position to verify communication
-            let _ = self.read_encoder_position()?;
+        let _ = self.read_encoder_position()?;
         
         info!("Roller485 initialization complete");
         Ok(())
     }
 
+    /// Read the current device mode
+    ///
+    /// Returns the mode as a Roller485Mode enum
+    pub fn read_mode(&mut self) -> Result<Roller485Mode, I2C::Error> {
+        let mut buffer = [0u8; 1];
+        self.i2c
+            .write_read(self.address, &[registers::MODE_REG], &mut buffer)?;
+        Ok(Roller485Mode::from(buffer[0]))
+    }
+
+    /// Set the device mode
+    ///
+    /// # Arguments
+    /// * `mode` - The mode to set
+    pub fn set_mode(&mut self, mode: Roller485Mode) -> Result<(), I2C::Error> {
+        let mode_val: u8 = mode.into();
+        self.i2c
+            .write(self.address, &[registers::MODE_REG, mode_val])?;
+        Ok(())
+    }
+
     /// Read the current encoder position
     ///
-    /// Returns the encoder position as a 32-bit signed integer.
-    /// The value represents the cumulative position in encoder steps.
-        pub fn read_encoder_position(&mut self) -> Result<i32, I2C::Error> {
+    /// Returns the position value from register 0x90 (divided by 100).
+    /// The value represents the cumulative position.
+    pub fn read_encoder_position(&mut self) -> Result<i32, I2C::Error> {
         let mut buffer = [0u8; 4];
         self.i2c
-              .write_read(self.address, &[registers::ENCODER_REG], &mut buffer)?;
+            .write_read(self.address, &[registers::POSITION_READBACK_REG], &mut buffer)?;
         
-        // Convert little-endian bytes to i32
-        Ok(i32::from_le_bytes(buffer))
+        // Convert little-endian bytes to i32, then divide by 100 (device units)
+        let raw = i32::from_le_bytes(buffer);
+        Ok(raw / 100)
     }
 
     /// Read angle and raw block with retry for consistency.
-    /// Reads multiple times and returns only when two consecutive reads match.
+    /// Reads position from register 0x90 and converts to angle (0-359°).
+    /// Retries until two consecutive reads match.
     pub fn read_angle_block(&mut self) -> Result<AngleBlock, I2C::Error> {
-        let mut prev_buf = [0u8; 8];
-        self.read_block(0x00, &mut prev_buf)?;
+        let mut prev_position = 0i32;
+        let _ = self.read_encoder_position()?;
         
         // Try up to 3 times to get two consistent reads
         for _ in 0..3 {
-            let mut buf = [0u8; 8];
-            self.read_block(0x00, &mut buf)?;
+            let position = self.read_encoder_position()?;
             
             // If two consecutive reads match, we have stable data
-            if buf == prev_buf {
-                return Ok(parse_angle_block(buf));
+            if position == prev_position {
+                return Ok(parse_position_to_angle(position));
             }
-            prev_buf = buf;
+            prev_position = position;
         }
         
         // If we couldn't get consistent data, return last read
-        Ok(parse_angle_block(prev_buf))
+        Ok(parse_position_to_angle(prev_position))
     }
 
     /// Convenience: angle only
     pub fn read_angle_deg(&mut self) -> Result<u16, I2C::Error> {
         let block = self.read_angle_block()?;
         Ok(block.angle_deg)
+    }
+
+    /// Ensure the device is in encoder reading mode
+    ///
+    /// Call this if you suspect the mode may have been changed,
+    /// for example after navigating menu pages on the device.
+    pub fn ensure_encoder_mode(&mut self) -> Result<(), I2C::Error> {
+        let mode = self.read_mode()?;
+        if mode != Roller485Mode::Encoder {
+            info!("Roller485 mode was {:?}, resetting to Encoder", mode);
+            self.set_mode(Roller485Mode::Encoder)?;
+        }
+        Ok(())
     }
 
     /// Release the I2C bus
@@ -141,15 +224,22 @@ where
     }
 }
 
-fn parse_angle_block(buf: [u8; 8]) -> AngleBlock {
-    let steps = i32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
-    let zero_block = buf == [0u8; 8];
-    let angle_f = f32::from_le_bytes([buf[4], buf[5], buf[6], buf[7]]);
-    let wrapped = ((angle_f % 360.0) + 360.0) % 360.0;
+/// Parse position value into angle (0-359 degrees).
+/// Assumes ~333 steps per full rotation (360 degrees).
+/// Device position divided by 100, so 33300 raw units = 360 degrees.
+fn parse_position_to_angle(position: i32) -> AngleBlock {
+    let steps_per_rotation = 360;
+    
+    // Normalize position to 0-999 range
+    let normalized_pos = ((position % steps_per_rotation) + steps_per_rotation) % steps_per_rotation;
+    
+    // Convert to degrees: (position / steps_per_rotation) * 360
+    let angle_f = (normalized_pos as f32 / steps_per_rotation as f32) * 360.0;
+    
     AngleBlock {
-        steps,
-        angle_deg: wrapped as u16,
-        zero_block,
+        steps: position,
+        angle_deg: angle_f as u16,
+        zero_block: position == 0,
     }
 }
 
@@ -159,29 +249,36 @@ mod tests {
 
     #[test]
     fn test_angle_conversion() {
-        // Mock test - actual hardware tests would need embedded-hal-mock
-        // Testing the angle calculation logic
-        let steps = 500; // half rotation
-        let steps_per_rev = 1000;
-        let angle = (steps * 360 / steps_per_rev) as u16;
-        assert_eq!(angle, 180);
+        // Test position to angle conversion
+        // 166.5 steps out of 333 = 180 degrees
+        let angle_block = parse_position_to_angle(166);
+        assert!(angle_block.angle_deg >= 179 && angle_block.angle_deg <= 181);
+        assert_eq!(angle_block.steps, 166);
+        assert!(!angle_block.zero_block);
     }
 
     #[test]
-    fn parse_block_wraps_angle() {
-        // 400.5 degrees -> expect wrap to 40
-        let buf = [0, 0, 0, 0, 0x00, 0x00, 0xc8, 0x43];
-        let parsed = parse_angle_block(buf);
-        assert_eq!(parsed.angle_deg, 40);
-        assert!(!parsed.zero_block);
-        assert_eq!(parsed.steps, 0);
+    fn test_position_wrapping() {
+        // Test that position wraps correctly
+        // 500 steps should wrap (500 % 333 = 167)
+        let angle_block = parse_position_to_angle(500);
+        assert_eq!(angle_block.steps, 500);
     }
 
     #[test]
-    fn parse_block_detects_zero_block() {
-        let parsed = parse_angle_block([0; 8]);
-        assert!(parsed.zero_block);
-        assert_eq!(parsed.angle_deg, 0);
-        assert_eq!(parsed.steps, 0);
+    fn test_negative_position_wrapping() {
+        // Test negative position wrapping
+        // -167 steps should wrap to approximately 180 degrees (halfway around)
+        let angle_block = parse_position_to_angle(-167);
+        assert!(angle_block.angle_deg >= 179 && angle_block.angle_deg <= 181);
+        assert_eq!(angle_block.steps, -167);
+    }
+
+    #[test]
+    fn test_zero_block_detection() {
+        let angle_block = parse_position_to_angle(0);
+        assert!(angle_block.zero_block);
+        assert_eq!(angle_block.angle_deg, 0);
+        assert_eq!(angle_block.steps, 0);
     }
 }

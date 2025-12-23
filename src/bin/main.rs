@@ -89,6 +89,13 @@ async fn main(spawner: Spawner) -> ! {
 
         // Main application loop - read Roller485 angle and display
     loop {
+            // Periodically ensure we're in encoder mode (in case user switched modes on device)
+            if loop_counter % 500 == 0 {
+                if let Err(e) = roller485.ensure_encoder_mode() {
+                    log::warn!("Failed to verify/set encoder mode: {:?}", e);
+                }
+            }
+
             // Read angle and detect zero-blocks (spurious reads)
             let block = match roller485.read_angle_block() {
                 Ok(v) => v,
