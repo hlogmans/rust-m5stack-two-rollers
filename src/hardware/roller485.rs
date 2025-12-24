@@ -31,6 +31,8 @@ mod registers {
     pub const MODE_REG: u8 = 0x01;
     /// Speed Setting register (4 bytes, little-endian i32, set target speed in RPM)
     pub const SPEED_CONTROL_REG: u8 = 0x40;
+    /// Speed Readback register (4 bytes, little-endian i32, read current speed)
+    pub const SPEED_READBACK_REG: u8 = 0x60;
     /// Position Control register (4 bytes, little-endian i32, set target position)
     pub const POSITION_CONTROL_REG: u8 = 0x80;
     /// Position Readback register (4 bytes, little-endian i32, divide by 100 for actual position)
@@ -318,6 +320,23 @@ where
         self.i2c.write(MOTOR_B_ADDR, data)
     }
 
+    /// Read current motor speed (RPM).
+    ///
+    /// Reads the 4-byte speed readback register at 0x60, converts the
+    /// little-endian signed value to RPM with /100 scaling (per spec).
+    pub fn read_speed_rpm(&mut self) -> Result<f32, I2C::Error> {
+        let raw = self.read_speed_raw()?;
+        Ok(raw as f32 / 100.0)
+    }
+
+    /// Read the raw speed register (scaled by 100).
+    /// Returns the signed i32 value directly from the device.
+    pub fn read_speed_raw(&mut self) -> Result<i32, I2C::Error> {
+        let mut buffer = [0u8; 4];
+        let _ = self.read_block(registers::SPEED_READBACK_REG, &mut buffer)?;
+        Ok(i32::from_le_bytes(buffer))
+    }
+
     /// Convenience: enable Motor B on the shared I2C bus
     pub fn enable_motor_b(&mut self) -> Result<(), I2C::Error> {
         self.write_to_motor_b(&[registers::MOTOR_ENABLE_REG, 0x01])
@@ -394,6 +413,16 @@ mod tests {
         assert!(angle_block.angle_deg >= 179 && angle_block.angle_deg <= 181);
         assert_eq!(angle_block.steps, 166);
         assert!(!angle_block.zero_block);
+    }
+
+    #[test]
+    fn test_speed_readback_conversion() {
+        // 123.45 RPM encoded as (12345) in little-endian i32
+        let bytes = 12345i32.to_le_bytes();
+        let value = i32::from_le_bytes(bytes);
+        assert_eq!(value, 12345);
+        let rpm = value as f32 / 100.0;
+        assert!((rpm - 123.45).abs() < 0.01);
     }
 
     #[test]

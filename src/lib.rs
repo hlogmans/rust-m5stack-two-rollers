@@ -4,5 +4,6 @@
 pub mod business;
 pub mod display;
 pub mod hardware;
+pub mod filters;
 
 extern crate alloc;

@@ -1004,6 +1004,7 @@ dependencies = [
  "critical-section",
  "display-interface-spi",
  "embassy-executor",
+ "embassy-futures",
  "embassy-sync 0.6.2",
  "embassy-time",
  "embedded-graphics",

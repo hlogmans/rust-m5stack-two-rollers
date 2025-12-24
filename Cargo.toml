@@ -38,6 +38,7 @@ axp2101 = { git = "https://github.com/georgik/axp2101-rs.git", tag = "v0.2.0" }
 aw9523 = { path = "./local_aw9523" }
 embedded-hal-async = "1.0.0"
 heapless = "0.8.0"
+embassy-futures = "0.1.2"
 
 
 [profile.dev]
