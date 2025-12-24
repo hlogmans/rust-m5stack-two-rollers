@@ -5,5 +5,6 @@ pub mod business;
 pub mod display;
 pub mod hardware;
 pub mod filters;
+pub mod log;
 
 extern crate alloc;

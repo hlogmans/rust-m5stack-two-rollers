@@ -5,7 +5,7 @@
 //! function for reading touch data via a shared I2C reference.
 
 use embedded_hal::i2c::I2c;
-use log::{debug, info};
+use crate::{debug, info};
 
 /// I2C address of the FT6336 touch controller
 const FT6336_ADDR: u8 = 0x38;
@@ -116,7 +116,7 @@ where
             debug!("Touch: read status OK, byte=0x{:02x}", status[0]);
         }
         Err(e) => {
-            info!("Touch: I2C error reading status: {:?}", e);
+            info!("Touch: I2C error reading status");
             return Err(e);
         }
     }
@@ -133,10 +133,10 @@ where
     let mut touch_data = [0u8; 4];
     match i2c.write_read(FT6336_ADDR, &[registers::P1_XH], &mut touch_data) {
         Ok(()) => {
-            debug!("Touch data: {:02x?}", touch_data);
+            debug!("Touch data: {:?}", touch_data);
         }
         Err(e) => {
-            info!("Touch: I2C error reading data: {:?}", e);
+            info!("Touch: I2C error reading data");
             return Err(e);
         }
     }
@@ -158,7 +158,7 @@ where
     // Extract Y coordinate: bits [3:0] of byte 2 are Y[11:8], byte 3 is Y[7:0]
     let y = (((touch_data[2] & 0x0F) as u16) << 8) | (touch_data[3] as u16);
 
-    info!("Touch: x={}, y={}, event={:?}", x, y, event);
+    info!("Touch: x={}, y={}", x, y);
 
     Ok(Some(TouchPoint { x, y, event }))
 }

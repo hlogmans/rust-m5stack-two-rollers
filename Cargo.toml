@@ -9,23 +9,24 @@ name = "m5-minimal"
 path = "./src/bin/main.rs"
 
 [dependencies]
-esp-hal = { version = "~1.0", features = ["esp32s3", "log-04", "unstable"] }
+esp-hal = { version = "~1.0", features = ["esp32s3", "defmt", "unstable"] }
 
 esp-rtos = { version = "0.2.0", features = [
   "embassy",
   "esp-alloc",
   "esp32s3",
-  "log-04",
+  "defmt",
 ] }
 
-esp-bootloader-esp-idf = { version = "0.4.0", features = ["esp32s3", "log-04"] }
-log                    = "0.4.27"
+esp-bootloader-esp-idf = { version = "0.4.0", features = ["esp32s3", "defmt"] }
+defmt                = "1.0.1"
+defmt-rtt            = "1.1.0"
 
-embassy-executor = { version = "0.9.1", features = ["log"] }
-embassy-time     = { version = "0.5.0", features = ["log"] }
-embassy-sync     = "0.6.0"
+embassy-executor = { version = "0.9.1", features = ["defmt"] }
+embassy-time     = { version = "0.5.0", features = ["defmt"] }
+embassy-sync     = { version = "0.6.0", features = ["defmt"] }
 esp-alloc        = "0.9.0"
-esp-println      = { version = "0.16.1", features = ["esp32s3", "log-04"] }
+esp-println      = { version = "0.16.1", features = ["esp32s3"] }
 
 critical-section = "1.2.0"
 static_cell      = "2.1.1"

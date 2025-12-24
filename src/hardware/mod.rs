@@ -9,10 +9,10 @@ pub mod roller485;
 pub mod touch;
 
 use crate::display::{self, Display};
+use crate::{info, warn};
 use embassy_time::Timer;
 use esp_hal::i2c::master::{Config as I2cConfig, I2c};
 use esp_hal::time::Rate;
-use log::{info, warn};
 
 pub use roller485::Roller485;
 pub use touch::{FT6336, TouchEvent, TouchPoint, read_touch_data};

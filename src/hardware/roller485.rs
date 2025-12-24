@@ -14,7 +14,7 @@
 
 use embedded_hal::i2c::I2c;
 use embassy_time::{Duration, Timer};
-use log::info;
+use crate::info;
 
 /// I2C address for Roller485 (default)
 pub const ROLLER485_DEFAULT_ADDR: u8 = 0x64;
@@ -132,8 +132,8 @@ where
         self.set_mode(Roller485Mode::Encoder)?;
         
         // Verify mode was set
-        let mode = self.read_mode()?;
-        info!("Roller485 mode set to: {:?}", mode);
+        let _ = self.read_mode()?;
+        info!("Roller485 mode set");
         
         // Try reading encoder position to verify communication
         let _ = self.read_encoder_position()?;
@@ -354,7 +354,7 @@ where
     pub fn ensure_encoder_mode(&mut self) -> Result<(), I2C::Error> {
         let mode = self.read_mode()?;
         if mode != Roller485Mode::Encoder {
-            info!("Roller485 mode was {:?}, resetting to Encoder", mode);
+            info!("Roller485 mode reset to Encoder");
             self.set_mode(Roller485Mode::Encoder)?;
         }
         Ok(())

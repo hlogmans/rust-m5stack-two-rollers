@@ -19,6 +19,7 @@ use embedded_graphics::prelude::*;
 use embedded_graphics::primitives::{Circle, PrimitiveStyle, PrimitiveStyleBuilder, Rectangle};
 use embedded_graphics::mono_font::{ascii::FONT_10X20, MonoTextStyle};
 use embedded_graphics::text::{Alignment, Text};
+use defmt::info;
 use embedded_hal_bus::spi::ExclusiveDevice;
 use esp_hal::delay::Delay;
 use esp_hal::gpio::{Level, Output, OutputConfig};
@@ -56,7 +57,7 @@ pub fn init<'a>(
         Output<'a>,
     >,
 > {
-    log::info!("Initializing SPI...");
+    info!("Initializing SPI...");
     let spi = Spi::new(
         pins.spi2,
         SpiConfig::default()
@@ -67,14 +68,14 @@ pub fn init<'a>(
     .with_mosi(pins.gpio_mosi)
     .with_sck(pins.gpio_sck);
 
-    log::info!("Initializing GPIO pins...");
+    info!("Initializing GPIO pins...");
     let cs = Output::new(pins.gpio_cs, Level::High, OutputConfig::default());
     let spi_device = ExclusiveDevice::new_no_delay(spi, cs).expect("Failed to create SPI device");
 
     // Prepare reset pin and force a clean reset after PMU init
     let mut rst = Output::new(pins.gpio_rst, Level::Low, OutputConfig::default());
     let mut delay = Delay::new();
-    log::info!("Forcing LCD reset (LOW 20ms -> HIGH 120ms)...");
+    info!("Forcing LCD reset (LOW 20ms -> HIGH 120ms)...");
     rst.set_low();
     delay.delay_millis(20);
     rst.set_high();
@@ -83,10 +84,10 @@ pub fn init<'a>(
     // DC pin and display interface
     let dc = Output::new(pins.gpio_dc, Level::Low, OutputConfig::default());
     // The display interface uses the provided temporary buffer for transfers.
-    log::info!("Creating display interface...");
+    info!("Creating display interface...");
     let di = SpiInterface::new(spi_device, dc, buffer);
 
-    log::info!("Initializing ILI9342C display controller...");
+    info!("Initializing ILI9342C display controller...");
     let display = Builder::new(ILI9342CRgb565, di)
         .reset_pin(rst)
         .color_order(mipidsi::options::ColorOrder::Rgb)
@@ -94,7 +95,7 @@ pub fn init<'a>(
         .init(&mut delay)
         .expect("Failed to initialize display");
 
-    log::info!("Display initialization complete");
+    info!("Display initialization complete");
     // Wrap in our high-level Display facade
     Display {
         inner: display,

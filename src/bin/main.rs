@@ -7,6 +7,9 @@
 )]
 #![deny(clippy::large_stack_frames)]
 
+use defmt_rtt as _;
+use m5_minimal::{info, warn};
+
 use alloc::boxed::Box;
 use alloc::sync::Arc;
 use embassy_executor::Spawner;
@@ -18,19 +21,10 @@ use embassy_sync::watch::Watch;
 use embassy_time::{Duration, Timer};
 use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
-use log::{info, warn};
 use m5_minimal::display::Display;
 use m5_minimal::filters::MotorValueFilter;
 use m5_minimal::hardware::Board;
 
-/// Reset state for Motor A
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-enum ResetState {
-    Requested,
-    StartMoving,
-    Moving,
-    Complete,
-}
 
 // Global channel to stream angle updates from motor task to display task
 static ANGLE_A_CH: Watch<CriticalSectionRawMutex, u16, 8> = Watch::new();
@@ -43,6 +37,8 @@ static MOTOR_A_RESET: Channel<CriticalSectionRawMutex, bool, 1> = Channel::new()
 
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo) -> ! {
+    // Note: can't use info! macro here as it uses esp_println indirectly
+    // esp_println::println!("Panic: {:?}", info);
     loop {}
 }
 
@@ -58,18 +54,16 @@ esp_bootloader_esp_idf::esp_app_desc!();
 )]
 #[esp_rtos::main]
 async fn main(spawner: Spawner) -> ! {
-    esp_println::logger::init_logger_from_env();
-
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);
 
     esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 73744);
 
-    info!("Embassy initialized!");
-
     // Start embassy executor timer FIRST - needed for any async operations
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     esp_rtos::start(timg0.timer0);
+
+    info!("Embassy initialized!");
 
     // Initialize all hardware (power, display, and two Roller485 motors on separate I2C buses)
     let display_buffer: &'static mut [u8; 512] = Box::leak(Box::new([0_u8; 512]));
@@ -135,7 +129,7 @@ async fn run_motor_a_reader(
     let angle_sender = ANGLE_A_CH.sender();
     let speed_sender = SPEED_A_CH.sender();
 
-    let mut speed_filter = MotorValueFilter::new(0.2, 0.3, 0.05);
+    let mut speed_filter = MotorValueFilter::new(0.75, 0.3, 0.05);
 
     loop {
         {
@@ -156,7 +150,7 @@ async fn run_motor_a_reader(
             match guard.read_speed_rpm() {
                 Ok(rpm) => {
                     if let Some(rpm) = speed_filter.update(rpm) {
-                        info!("Motor speed: {:.2} RPM", rpm);
+                        info!("Motor speed: {} RPM", rpm);
                         let _ = speed_sender.send(rpm);
                     }
                 }
@@ -166,7 +160,7 @@ async fn run_motor_a_reader(
             }
         }
 
-        Timer::after(Duration::from_millis(100)).await;
+        Timer::after(Duration::from_millis(25)).await;
     }
 }
 
@@ -182,7 +176,6 @@ async fn run_motor_a_reset(
 ) {
     info!("Motor A reset: start (I2C1, addr=0x64)");
 
-    let mut reset_state = ResetState::Complete;
     let mut angle_receiver = ANGLE_A_CH
         .receiver()
         .expect("Could not register angle receiver for Motor A reset");
@@ -203,8 +196,10 @@ async fn run_motor_a_reset(
         }
 
         // we need to move, so lets move to position 0
-        let mut guard = motor.lock().await;
-        let _ = guard.set_position(0);
+        {
+            let mut guard = motor.lock().await;
+            let _ = guard.set_position(0);
+        } // lock is released here
 
         info!("Waiting for speed to reach nonZero...");
         let _ = speed_receiver.changed_and(|v| v.abs() > 0.2f32).await;
@@ -214,8 +209,10 @@ async fn run_motor_a_reset(
 
         Timer::after(Duration::from_millis(100)).await;
 
-        let mut guard = motor.lock().await;
-        let _ = guard.ensure_encoder_mode();
+        {
+            let mut guard = motor.lock().await;
+            let _ = guard.ensure_encoder_mode();
+        } // lock is released here
 
         info!("Motor A reset to zero complete.");
 
