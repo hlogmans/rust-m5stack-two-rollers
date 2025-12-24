@@ -223,35 +223,38 @@ impl<D: DrawTarget<Color = Rgb565>> Display<D> {
         let pos_a = Point::new(center.x, center.y - 20);
         let pos_b = Point::new(center.x, center.y + 20);
 
-        // Skip redraws that haven't changed
-        let a_changed = self.last_a.map(|v| v != angle_a).unwrap_or(true);
-        let b_changed = self.last_b.map(|v| v != angle_b).unwrap_or(true);
-
-        // Erase previous A if changed
-        if a_changed {
-            if let Some(prev_a) = self.last_a {
-                let mut prev_buf_a = heapless::String::<16>::new();
-                let _ = write!(prev_buf_a, "A: {}", prev_a);
-                self.draw_centered_text(&prev_buf_a, pos_a, colors::black());
-            }
-            let mut buf_a = heapless::String::<16>::new();
-            let _ = write!(buf_a, "A: {}", angle_a);
-            self.draw_centered_text(&buf_a, pos_a, colors::white());
+        // Update A
+        if self.should_update_cached(self.last_a, angle_a) {
+            self.erase_and_draw_labeled_angle("A", self.last_a, angle_a, pos_a);
             self.last_a = Some(angle_a);
         }
 
-        // Erase previous B if changed
-        if b_changed {
-            if let Some(prev_b) = self.last_b {
-                let mut prev_buf_b = heapless::String::<16>::new();
-                let _ = write!(prev_buf_b, "B: {}", prev_b);
-                self.draw_centered_text(&prev_buf_b, pos_b, colors::black());
-            }
-            let mut buf_b = heapless::String::<16>::new();
-            let _ = write!(buf_b, "B: {}", angle_b);
-            self.draw_centered_text(&buf_b, pos_b, colors::white());
+        // Update B
+        if self.should_update_cached(self.last_b, angle_b) {
+            self.erase_and_draw_labeled_angle("B", self.last_b, angle_b, pos_b);
             self.last_b = Some(angle_b);
         }
+    }
+
+    /// Check if a cached value needs updating
+    #[inline]
+    fn should_update_cached(&self, cached: Option<u16>, new_value: u16) -> bool {
+        cached.map(|v| v != new_value).unwrap_or(true)
+    }
+
+    /// Erase previous labeled angle and draw new one
+    fn erase_and_draw_labeled_angle(&mut self, label: &str, prev: Option<u16>, angle: u16, position: Point) {
+        // Erase previous text if it exists
+        if let Some(prev_val) = prev {
+            let mut prev_buf = heapless::String::<16>::new();
+            let _ = write!(prev_buf, "{}: {}", label, prev_val);
+            self.draw_centered_text(&prev_buf, position, colors::black());
+        }
+        
+        // Draw new text
+        let mut buf = heapless::String::<16>::new();
+        let _ = write!(buf, "{}: {}", label, angle);
+        self.draw_centered_text(&buf, position, colors::white());
     }
 
     /// Expose screen size for convenience.

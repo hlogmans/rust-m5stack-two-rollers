@@ -32,11 +32,17 @@ pub type CoreS3Display<'a> = mipidsi::Display<
     esp_hal::gpio::Output<'a>,
 >;
 
+/// Simple wrapper for Motor B that holds its address but shares I2C with Motor A
+pub struct MotorB {
+    pub address: u8,
+}
+
 /// Represents the initialized M5Stack CoreS3 hardware
 pub struct Board<'a> {
     pub display: Display<CoreS3Display<'a>>,
     pub roller_a: Roller485<I2c<'a, esp_hal::Blocking>>,
-    pub roller_b: Roller485<I2c<'a, esp_hal::Blocking>>,
+    pub roller_b: MotorB,
+    pub touch: FT6336<I2c<'a, esp_hal::Blocking>>,
 }
 
 impl<'a> Board<'a> {
@@ -62,7 +68,12 @@ impl<'a> Board<'a> {
     /// * `gpio_dc` - GPIO35 for display DC
     /// * `gpio_rst` - GPIO15 for display RST
     /// * `display_buffer` - Buffer for display SPI transfers (min 512 bytes)
-    /// * `i2c1` - I2C1 peripheral (Port A/Grove) on GPIO2 (SDA) / GPIO1 (SCL) for Motor B
+    /// * `i2c1` - I2C1 peripheral (Port A/Grove) on GPIO2 (SDA) / GPIO1 (SCL)
+    /// * `gpio_ext_sda` - GPIO2 for I2C1 SDA (Motor A)
+    /// * `gpio_ext_scl` - GPIO1 for I2C1 SCL (Motor A)
+    /// 
+    /// Both Motor A (address 0x64) and Motor B (address 0x65) share the same
+    /// I2C1 bus on Port A pins for simplicity.
     /// 
     /// # Returns
     /// A `Board` struct containing all initialized hardware
@@ -78,10 +89,8 @@ impl<'a> Board<'a> {
         gpio_rst: esp_hal::peripherals::GPIO15<'a>,
         display_buffer: &'a mut [u8; 512],
         i2c1: esp_hal::peripherals::I2C1<'a>,
-        gpio_ext_sda: esp_hal::peripherals::GPIO2<'a>,
-        gpio_ext_scl: esp_hal::peripherals::GPIO1<'a>,
-        gpio_port_c_sda: esp_hal::peripherals::GPIO17<'a>,
-        gpio_port_c_scl: esp_hal::peripherals::GPIO18<'a>,
+        i2c1_sda: impl esp_hal::gpio::interconnect::PeripheralOutput<'a>,
+        i2c1_scl: impl esp_hal::gpio::interconnect::PeripheralOutput<'a>,
     ) -> Self {
         info!("Initializing M5Stack CoreS3 hardware...");
 
@@ -116,42 +125,41 @@ impl<'a> Board<'a> {
         };
         let display = display::init(disp_pins, display_buffer);
         
-        // Grove I2C bus on Port A (GPIO2 SDA, GPIO1 SCL) - Motor A only
-        info!("Initializing I2C1 for Grove Port A (Motor A)...");
-        let mut i2c1_bus = I2c::new(
+        // Grove I2C bus (selected pins) - Motors
+        info!("Initializing I2C1 for Grove port (motors)...");
+        // Motor A at address 0x64 on I2C1
+        info!("Initializing Roller485 Motor A at address 0x64 on I2C1...");
+        let i2c1_bus = I2c::new(
             i2c1,
             I2cConfig::default().with_frequency(Rate::from_khz(400)),
         )
         .expect("Failed to create I2C1")
-        .with_sda(gpio_ext_sda)
-        .with_scl(gpio_ext_scl);
+        .with_sda(i2c1_sda)
+        .with_scl(i2c1_scl);
 
-        scan_i2c_bus(&mut i2c1_bus, "I2C1 Port A");
-
-        // Motor A at address 0x64 on I2C1 (Port A)
-        info!("Initializing Roller485 Motor A at address 0x64 on I2C1 Port A...");
         let mut roller_a = Roller485::new(i2c1_bus);
         let _ = roller_a.init();
-
-        // For now, Motor B uses the released I2C0 bus (Port C pins)
-        // This separates it from touch controller which would use I2C0 on GPIO12/11
-        info!("Initializing Motor B on released I2C0 instance (temporary solution)...");
-        let mut i2c0_motor_b = i2c0_released
-            .with_sda(gpio_port_c_sda)
-            .with_scl(gpio_port_c_scl);
+        // Scan I2C1 bus to confirm motor addresses respond
+        scan_i2c_bus(&mut roller_a.i2c, "I2C1 (motors)");
         
-        scan_i2c_bus(&mut i2c0_motor_b, "I2C0 Port C (Motor B)");
-
-        // Motor B at address 0x65
-        info!("Initializing Roller485 Motor B at address 0x65...");
-        let mut roller_b = Roller485::new_with_address(i2c0_motor_b, 0x65);
-        let _ = roller_b.init();
+        // Motor B at address 0x65 - commands via Motor A's shared I2C1 bus
+        // Both motors are on the same I2C bus (Port A pins) but at different addresses
+        info!("Initializing Motor B at address 0x65 on shared I2C1 bus...");
+        let _ = roller_a.enable_motor_b();
+        let _ = roller_a.set_motor_b_encoder_mode();
+        info!("Motor B initialized at address 0x65");
         
-        info!("NOTE: Touch currently disabled - needs separate I2C instance");
+        // Use I2C0 for touch controller on GPIO12/11
+        info!("Initializing FT6336 touch controller on I2C0...");
+        let touch = FT6336::new(i2c0_released);
+        info!("Touch controller ready at address 0x38");
         
-        info!("M5Stack CoreS3 hardware initialization complete");
-        
-        Self { display, roller_a, roller_b }
+        Self { 
+            display, 
+            roller_a, 
+            roller_b: MotorB { address: 0x65 },
+            touch 
+        }
     }
 }
 

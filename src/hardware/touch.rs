@@ -15,9 +15,9 @@ mod registers {
     pub const TOUCH_POINTS: u8 = 0x02;
     // First touch point starts at 0x03
     pub const P1_XH: u8 = 0x03;  // Event flags + X high bits
-    pub const P1_XL: u8 = 0x04;  // X low bits
-    pub const P1_YH: u8 = 0x05;  // Y high bits
-    pub const P1_YL: u8 = 0x06;  // Y low bits
+    pub const _P1_XL: u8 = 0x04;  // X low bits, not used
+    pub const _P1_YH: u8 = 0x05;  // Y high bits, not used
+    pub const _P1_YL: u8 = 0x06;  // Y low bits, not used
 }
 
 /// Touch event type

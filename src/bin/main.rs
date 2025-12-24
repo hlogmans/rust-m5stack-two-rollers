@@ -70,10 +70,8 @@ async fn main(spawner: Spawner) -> ! {
         peripherals.GPIO15,
         display_buffer,
         peripherals.I2C1,
-        peripherals.GPIO2,
-        peripherals.GPIO1,
-        peripherals.GPIO17,
-        peripherals.GPIO18,
+        peripherals.GPIO9,  // Port B SDA
+        peripherals.GPIO8,  // Port B SCL
     )
     .await;
 
@@ -81,15 +79,16 @@ async fn main(spawner: Spawner) -> ! {
     let display = board.display;
     spawner.must_spawn(run_display(display));
 
-    // Extract motors
+    // Extract motors and touch
     let motor_a = board.roller_a;
-    let motor_b = board.roller_b;
+    let _motor_b = board.roller_b;  // Motor B is on same bus as A, commands sent via A's I2C
+    let touch = board.touch;
 
-    // Poll A's encoder; have B follow A's position
+    // Poll Motor A (Motor B shares the same I2C1 bus, commanded via Motor A's i2c field)
     spawner.must_spawn(run_motor_a_poll(motor_a));
-    spawner.must_spawn(run_motor_b_follow(motor_b));
+    spawner.must_spawn(run_touch_reader(touch));
     
-    info!("Motor A on I2C1 Port A, Motor B on I2C0 Port C - Touch temporarily disabled");
+    info!("Motor A and Motor B on shared I2C1 Port A, Touch on I2C0");
 
     // Idle loop
     loop {
@@ -98,9 +97,10 @@ async fn main(spawner: Spawner) -> ! {
 }
 
 /// Task: Motor B follows Motor A's encoder position once per second
+#[allow(dead_code)]
 #[embassy_executor::task]
 async fn run_motor_b_follow(mut motor: m5_minimal::hardware::Roller485<esp_hal::i2c::master::I2c<'static, esp_hal::Blocking>>) {
-    info!("Motor B FOLLOW: start (I2C0 Port C, addr=0x65)");
+    info!("Motor B FOLLOW: start (deprecated)");
     // Ensure position control is available when setting position
     let _ = motor.set_speed(1);
 
@@ -182,7 +182,7 @@ async fn run_motor_a_poll(mut motor: m5_minimal::hardware::Roller485<esp_hal::i2
             }
             Err(e) => warn!("Motor A read error: {:?}", e),
         }
-        Timer::after(Duration::from_millis(500)).await;
+        Timer::after(Duration::from_millis(25)).await;
     }
 }
 
@@ -203,6 +203,32 @@ async fn run_display(mut display: Display<m5_minimal::hardware::CoreS3Display<'s
             last_b = b;
         }
         display.update_dual_angles(last_a, last_b);
-        Timer::after(Duration::from_millis(100)).await;
+        Timer::after(Duration::from_millis(25)).await;
+    }
+}
+
+/// Task: Read touch events from FT6336 and log them
+#[embassy_executor::task]
+async fn run_touch_reader(mut touch: m5_minimal::hardware::FT6336<esp_hal::i2c::master::I2c<'static, esp_hal::Blocking>>) {
+    info!("Touch reader task starting...");
+    
+    loop {
+        if let Ok(Some(point)) = touch.read_touch() {
+            match point.event {
+                m5_minimal::hardware::TouchEvent::Press => {
+                    info!("TOUCH PRESS: x={}, y={}", point.x, point.y);
+                }
+                m5_minimal::hardware::TouchEvent::Contact => {
+                    // Only log contact occasionally to avoid spam
+                    // info!("Touch contact: x={}, y={}", point.x, point.y);
+                }
+                m5_minimal::hardware::TouchEvent::Release => {
+                    info!("TOUCH RELEASE");
+                }
+            }
+        }
+        
+        // Poll touch at ~100Hz
+        Timer::after(Duration::from_millis(10)).await;
     }
 }

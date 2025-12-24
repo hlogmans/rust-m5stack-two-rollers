@@ -19,6 +19,9 @@ use log::info;
 /// I2C address for Roller485 (default)
 pub const ROLLER485_DEFAULT_ADDR: u8 = 0x64;
 
+/// I2C address for Motor B (when sharing bus with Motor A)
+pub const MOTOR_B_ADDR: u8 = 0x65;
+
 /// Register addresses for Roller485 (I2C Protocol)
 /// See: M5Stack Unit Roller485 I2C Protocol Documentation
 mod registers {
@@ -103,6 +106,12 @@ where
     /// * `address` - Custom I2C address
     pub fn new_with_address(i2c: I2C, address: u8) -> Self {
         Self { i2c, address }
+    }
+
+    /// Consume this Roller485 instance and return the I2C bus
+    /// Useful for reconfiguring the I2C bus with different pins
+    pub fn into_i2c(self) -> I2C {
+        self.i2c
     }
 
     /// Initialize the Roller485 device
@@ -238,6 +247,23 @@ where
         Ok(())
     }
 
+    /// Write position command to Motor B (0x65) sharing the same I2C bus.
+    /// This is a write-only operation that doesn't require Motor B to have its own Roller485 instance.
+    /// 
+    /// # Arguments
+    /// * `position_steps` - Target position in steps
+    pub fn write_position_to_motor_b(&mut self, position_steps: i32) -> Result<(), I2C::Error> {
+        let target_position = position_steps * 100;
+        let bytes = target_position.to_le_bytes();
+        self.i2c.write(MOTOR_B_ADDR, &[
+            registers::POSITION_CONTROL_REG,
+            bytes[0],
+            bytes[1],
+            bytes[2],
+            bytes[3],
+        ])
+    }
+
     /// Set the target position in steps (synchronous helper).
     /// Position value is multiplied by 100 per device protocol.
     /// Automatically switches to Position Control mode if needed.
@@ -281,6 +307,25 @@ where
         ])?;
         
         Ok(())
+    }
+
+    /// Write a command to Motor B (address 0x65) on the same I2C bus.
+    /// This allows Motor A to command Motor B when they share the same I2C1 bus.
+    ///
+    /// # Arguments
+    /// * `data` - Raw command bytes to send to Motor B
+    pub fn write_to_motor_b(&mut self, data: &[u8]) -> Result<(), I2C::Error> {
+        self.i2c.write(MOTOR_B_ADDR, data)
+    }
+
+    /// Convenience: enable Motor B on the shared I2C bus
+    pub fn enable_motor_b(&mut self) -> Result<(), I2C::Error> {
+        self.write_to_motor_b(&[registers::MOTOR_ENABLE_REG, 0x01])
+    }
+
+    /// Convenience: set Motor B to encoder mode (same as Motor A)
+    pub fn set_motor_b_encoder_mode(&mut self) -> Result<(), I2C::Error> {
+        self.write_to_motor_b(&[registers::MODE_REG, Roller485Mode::Encoder as u8])
     }
 
     /// Ensure the device is in encoder reading mode
