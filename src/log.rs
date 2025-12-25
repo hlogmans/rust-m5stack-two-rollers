@@ -1,34 +1,27 @@
-//! Simple logging macros using esp_println
+//! Logging macros backed by `defmt` so output decodes and colors correctly in the monitor.
+//!
+//! Note: format strings must follow `defmt` formatting rules (implementing `Format`).
 
-/// Log an info message
+/// Log an info message via `defmt::info!`.
 #[macro_export]
 macro_rules! info {
     ($($arg:tt)*) => {
-        $crate::__print_internal!("[INFO] {}", format_args!($($arg)*))
+        defmt::info!($($arg)*);
     };
 }
 
-/// Log a warning message
+/// Log a warning message via `defmt::warn!`.
 #[macro_export]
 macro_rules! warn {
     ($($arg:tt)*) => {
-        $crate::__print_internal!("[WARN] {}", format_args!($($arg)*))
+        defmt::warn!($($arg)*);
     };
 }
 
-/// Log a debug message
+/// Log a debug message via `defmt::debug!`.
 #[macro_export]
 macro_rules! debug {
     ($($arg:tt)*) => {
-        $crate::__print_internal!("[DEBUG] {}", format_args!($($arg)*))
-    };
-}
-
-// Internal macro for actual printing - uses esp_println
-#[doc(hidden)]
-#[macro_export]
-macro_rules! __print_internal {
-    ($fmt:expr, $arg:expr) => {
-        esp_println::println!($fmt, $arg)
+        defmt::debug!($($arg)*);
     };
 }
