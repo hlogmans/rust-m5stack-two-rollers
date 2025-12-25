@@ -7,6 +7,7 @@
 pub mod power;
 pub mod roller485;
 pub mod touch;
+pub mod aw9523;
 
 use crate::display::{self, Display};
 use crate::{info, warn};

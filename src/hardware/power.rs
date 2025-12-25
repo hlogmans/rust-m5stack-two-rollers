@@ -20,9 +20,9 @@
 //! Reference: https://github.com/m5stack/M5Unified/blob/master/src/utility/Power_Class.cpp
 
 use axp2101::{Axp2101, I2CPowerManagementInterface};
-use aw9523::{Aw9523, I2CGpioExpanderInterface};
+use super::aw9523::{Aw9523, I2CGpioExpanderInterface};
 use esp_hal::i2c::master::I2c;
-use defmt::info;
+use defmt::{error, info};
 
 /// Initialize power management, GPIO expander, display, and Grove port power
 ///
@@ -46,7 +46,7 @@ pub fn init_power_and_display_control<'a>(i2c_bus: I2c<'a, esp_hal::Blocking>) -
     
     match axp.init() {
         Ok(_) => info!("AXP2101 initialized successfully"),
-        Err(_) => info!("AXP2101 initialization failed (continuing)"),
+        Err(_) => error!("AXP2101 initialization failed (continuing)"),
     }
     
     // Release I2C bus from AXP2101 to configure AW9523
@@ -65,7 +65,7 @@ pub fn init_power_and_display_control<'a>(i2c_bus: I2c<'a, esp_hal::Blocking>) -
             info!("  - Grove port power (BUS_OUT_EN) enabled");
             info!("  - Power boost (BOOST_EN) enabled");
         }
-        Err(_) => info!("AW9523 initialization failed"),
+        Err(_) => error!("AW9523 initialization failed"),
     }
     
     // Release the bus from AW9523 so it can be reused elsewhere
