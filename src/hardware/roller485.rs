@@ -14,7 +14,12 @@
 
 use embedded_hal::i2c::I2c;
 use embassy_time::{Duration, Timer};
-use crate::info;
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use embassy_sync::mutex::Mutex;
+use embassy_sync::channel::Channel;
+use alloc::sync::Arc;
+use crate::{info, warn};
+use crate::helpers::TelemetrySender;
 
 /// I2C address for Roller485 (default)
 pub const ROLLER485_DEFAULT_ADDR: u8 = 0x64;
@@ -448,5 +453,179 @@ mod tests {
         assert!(angle_block.zero_block);
         assert_eq!(angle_block.angle_deg, 0);
         assert_eq!(angle_block.steps, 0);
+    }
+}
+
+/// Commands that can be sent to a motor controller
+#[derive(Debug, Clone, Copy)]
+pub enum MotorCommand {
+    /// Move to absolute position (in steps)
+    SetPosition(i32),
+    /// Set speed (in RPM)
+    SetSpeed(i32),
+    /// Active Reading
+    SetReading
+}
+
+/// Shared wrapper around Roller485 with internal async locking and background polling.
+/// Use this type when you need to share a motor across multiple tasks.
+/// The motor publishes telemetry via channel-agnostic senders.
+pub struct SharedRoller485<I2C> {
+    inner: Arc<Mutex<CriticalSectionRawMutex, Roller485<I2C>>>,
+    angle_sender: Option<TelemetrySender<u16, 8>>,
+    speed_sender: Option<TelemetrySender<f32, 4>>,
+    command_channel: &'static Channel<CriticalSectionRawMutex, MotorCommand, 4>,
+}
+
+impl<I2C> Clone for SharedRoller485<I2C> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+            angle_sender: self.angle_sender.clone(),
+            speed_sender: self.speed_sender.clone(),
+            command_channel: self.command_channel,
+        }
+    }
+}
+
+impl<I2C> SharedRoller485<I2C>
+where
+    I2C: I2c,
+{
+    /// Wrap a Roller485 instance with channel-agnostic telemetry senders.
+    /// 
+    /// # Arguments
+    /// * `motor` - The Roller485 hardware driver
+    /// * `angle_sender` - Optional sender for angle updates (Watch/Channel/Both)
+    /// * `speed_sender` - Optional sender for speed updates (Watch/Channel/Both)
+    /// * `command_channel` - Channel for receiving motor commands
+    /// 
+    /// The motor doesn't know or care whether telemetry goes to a Watch or Channel.
+    pub fn new(
+        motor: Roller485<I2C>,
+        angle_sender: Option<TelemetrySender<u16, 8>>,
+        speed_sender: Option<TelemetrySender<f32, 4>>,
+        command_channel: &'static Channel<CriticalSectionRawMutex, MotorCommand, 4>,
+    ) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(motor)),
+            angle_sender,
+            speed_sender,
+            command_channel,
+        }
+    }
+
+    /// Send a command to the motor
+    pub async fn send_command(&self, cmd: MotorCommand) {
+        self.command_channel.send(cmd).await;
+    }
+
+    /// Start the motor background task that polls encoder/speed and processes commands.
+    /// This should be spawned once per motor instance.
+    /// 
+    /// # Arguments
+    /// * `speed_filter` - Optional filter for smoothing speed readings
+    pub async fn run_background_task(
+        self,
+        mut speed_filter: Option<crate::filters::MotorValueFilter>,
+    ) where
+        I2C: 'static,
+    {
+        info!("Motor background task starting");
+
+        // Ensure encoder mode on startup
+        let _ = self.ensure_encoder_mode().await;
+
+        let mut original_angle = 0;
+        let mut first_position_sent = false;
+
+        loop {
+            // Check for commands (non-blocking)
+            if let Ok(cmd) = self.command_channel.try_receive() {
+                match cmd {
+                    MotorCommand::SetPosition(pos) => {
+                        info!("Motor command: SetPosition({})", pos);
+                        let _ = self.set_position(pos).await;
+                    }
+                    MotorCommand::SetSpeed(rpm) => {
+                        info!("Motor command: SetSpeed({})", rpm);
+                        let _ = self.set_speed(rpm).await;
+                    }
+                    MotorCommand::SetReading => {
+                        let _ = self.ensure_encoder_mode().await;
+                    }
+                }
+            }
+
+            // Poll encoder position (if angle sender configured)
+            if let Some(ref sender) = self.angle_sender {
+                match self.read_encoder_position().await {
+                    Ok(steps) => {
+                        let angle = ((steps % 333 + 333) % 333) * 360 / 333;
+                        if (!first_position_sent) || (angle != original_angle) {
+                            info!("Motor position: steps={}, angle={}°", steps, angle);
+                            sender.send(angle as u16);
+                            first_position_sent = true;
+                            original_angle = angle;
+                        }
+                    }
+                    Err(_) if !first_position_sent => warn!("Motor read error"),
+                    Err(_) => {}
+                }
+            }
+
+            // Poll speed (if speed sender configured)
+            if let Some(ref sender) = self.speed_sender {
+                match self.read_speed_rpm().await {
+                    Ok(rpm) => {
+                        let filtered_rpm = if let Some(ref mut filter) = speed_filter {
+                            filter.update(rpm)
+                        } else {
+                            Some(rpm)
+                        };
+                        
+                        if let Some(rpm) = filtered_rpm {
+                            info!("Motor speed: {} RPM", rpm);
+                            sender.send(rpm);
+                        }
+                    }
+                    Err(_) => {
+                        warn!("Motor speed read error");
+                    }
+                }
+            }
+
+            Timer::after(Duration::from_millis(25)).await;
+        }
+    }
+
+    /// Ensure the motor is in encoder mode (async with internal locking)
+    async fn ensure_encoder_mode(&self) -> Result<(), I2C::Error> {
+        let mut guard = self.inner.lock().await;
+        guard.ensure_encoder_mode()
+    }
+
+    /// Read encoder position (async with internal locking)
+    async fn read_encoder_position(&self) -> Result<i32, I2C::Error> {
+        let mut guard = self.inner.lock().await;
+        guard.read_encoder_position()
+    }
+
+    /// Read motor speed in RPM (async with internal locking)
+    async fn read_speed_rpm(&self) -> Result<f32, I2C::Error> {
+        let mut guard = self.inner.lock().await;
+        guard.read_speed_rpm()
+    }
+
+    /// Set motor position (async with internal locking)
+    async fn set_position(&self, position_steps: i32) -> Result<(), I2C::Error> {
+        let mut guard = self.inner.lock().await;
+        guard.set_position(position_steps)
+    }
+
+    /// Set motor speed (async with internal locking)
+    async fn set_speed(&self, speed_rpm: i32) -> Result<(), I2C::Error> {
+        let mut guard = self.inner.lock().await;
+        guard.set_speed(speed_rpm)
     }
 }

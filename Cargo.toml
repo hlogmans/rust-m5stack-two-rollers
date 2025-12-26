@@ -21,6 +21,7 @@ esp-rtos = { version = "0.2.0", features = [
 esp-bootloader-esp-idf = { version = "0.4.0", features = ["esp32s3", "defmt"] }
 defmt                = "1.0.1"
 defmt-rtt            = "1.1.0"
+esp-backtrace       = { version = "0.18.1", features = ["esp32s3", "panic-handler", "println"] }
 
 embassy-executor = { version = "0.9.1", features = ["defmt"] }
 embassy-time     = { version = "0.5.0", features = ["defmt"] }

@@ -5,7 +5,11 @@
 //! function for reading touch data via a shared I2C reference.
 
 use embedded_hal::i2c::I2c;
+use embassy_sync::{mutex::Mutex, blocking_mutex::raw::CriticalSectionRawMutex};
+use embassy_time::Timer;
+use alloc::sync::Arc;
 use crate::{debug, info};
+use crate::helpers::TelemetrySender;
 
 /// I2C address of the FT6336 touch controller
 const FT6336_ADDR: u8 = 0x38;
@@ -161,4 +165,55 @@ where
     info!("Touch: x={}, y={}", x, y);
 
     Ok(Some(TouchPoint { x, y, event }))
+}
+
+/// Shared wrapper around FT6336 with telemetry sender
+///
+/// Provides async-safe access to the touch controller through an Arc<Mutex<>>.
+/// Automatically sends touch events via optional TelemetrySender (Watch or Channel).
+pub struct SharedFT6336<I2C, const N: usize> {
+    touch: Arc<Mutex<CriticalSectionRawMutex, FT6336<I2C>>>,
+    touch_sender: Option<TelemetrySender<TouchPoint, N>>,
+}
+
+impl<I2C, const N: usize> SharedFT6336<I2C, N>
+where
+    I2C: I2c + 'static,
+{
+    /// Create a new shared touch controller
+    pub fn new(
+        touch: FT6336<I2C>,
+        touch_sender: Option<TelemetrySender<TouchPoint, N>>,
+    ) -> Self {
+        Self {
+            touch: Arc::new(Mutex::new(touch)),
+            touch_sender,
+        }
+    }
+
+    /// Read touch data (locks internally)
+    pub async fn read_touch(&self) -> Result<Option<TouchPoint>, I2C::Error> {
+        let mut touch = self.touch.lock().await;
+        touch.read_touch()
+    }
+
+    /// Background task: continuously poll touch and publish via telemetry sender
+    ///
+    /// Poll rate: ~100Hz
+    pub async fn run_background_task(self) -> ! {
+        info!("Touch background task starting...");
+        
+        loop {
+            // Read touch via internal mutex
+            if let Ok(Some(point)) = self.read_touch().await {
+                // Publish to telemetry sender if configured
+                if let Some(ref sender) = self.touch_sender {
+                    sender.send(point);
+                }
+            }
+
+            // Poll at ~100Hz
+            Timer::after_millis(10).await;
+        }
+    }
 }

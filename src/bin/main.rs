@@ -9,38 +9,41 @@
 
 use defmt_rtt as _;
 use m5_minimal::{info, warn};
+use m5_minimal::hardware::Board;
+use m5_minimal::hardware::TouchPoint;
+use m5_minimal::helpers::TelemetrySender;
+use esp_backtrace as _; // provides panic handler with backtrace via esp-println
 
 use alloc::boxed::Box;
-use alloc::sync::Arc;
 use embassy_executor::Spawner;
 use embassy_futures::select;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
-use embassy_sync::mutex::Mutex;
 use embassy_sync::watch::Watch;
 use embassy_time::{Duration, Timer};
 use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
 use m5_minimal::display::Display;
 use m5_minimal::filters::MotorValueFilter;
-use m5_minimal::hardware::Board;
 
 
-// Global channel to stream angle updates from motor task to display task
+// Global channels for Motor A telemetry and commands
 static ANGLE_A_CH: Watch<CriticalSectionRawMutex, u16, 8> = Watch::new();
-static ANGLE_B_CH: Watch<CriticalSectionRawMutex, u16, 8> = Watch::new();
-
 static SPEED_A_CH: Watch<CriticalSectionRawMutex, f32, 4> = Watch::new();
+static MOTOR_A_CMD: Channel<CriticalSectionRawMutex, m5_minimal::hardware::MotorCommand, 4> = Channel::new();
 
-// channel to track/reset Motor A state (requested -> moving -> complete)
-static MOTOR_A_RESET: Channel<CriticalSectionRawMutex, bool, 1> = Channel::new();
+// Business logic: reset trigger
+static MOTOR_A_RESET: Channel<CriticalSectionRawMutex, (), 1> = Channel::new();
 
-#[panic_handler]
-fn panic(_: &core::panic::PanicInfo) -> ! {
-    // Note: can't use info! macro here as it uses esp_println indirectly
-    // esp_println::println!("Panic: {:?}", info);
-    loop {}
-}
+// Display gets angle updates for both motors
+static ANGLE_B_CH: Watch<CriticalSectionRawMutex, u16, 8> = Watch::new();
+static SPEED_B_CH: Watch<CriticalSectionRawMutex, f32, 4> = Watch::new();
+static MOTOR_B_CMD: Channel<CriticalSectionRawMutex, m5_minimal::hardware::MotorCommand, 4> = Channel::new();
+
+// Touch events
+static TOUCH_CH: Watch<CriticalSectionRawMutex, TouchPoint, 4> = Watch::new();
+
+// Panic handling is provided by esp-backtrace (print-uart feature) for stack traces
 
 extern crate alloc;
 
@@ -81,24 +84,59 @@ async fn main(spawner: Spawner) -> ! {
         peripherals.I2C1,
         peripherals.GPIO9, // Port B SDA
         peripherals.GPIO8, // Port B SCL
+        Some(TelemetrySender::from_watch(&ANGLE_A_CH)),   // Angle via Watch (display needs latest)
+        Some(TelemetrySender::from_watch(&SPEED_A_CH)),   // Speed via Watch (reset handler needs latest)
+        Some(TelemetrySender::from_watch(&ANGLE_B_CH)),   // Motor B angle for display
+        Some(TelemetrySender::from_watch(&SPEED_B_CH)),   // Motor B speed for diagnostics
+        &MOTOR_A_CMD,
+        &MOTOR_B_CMD,
     )
     .await;
 
     // Spawn display task to render angle updates
     let display = board.display;
-    spawner.must_spawn(run_display(display));
+    if let Err(e) = spawner.spawn(run_display(display)) {
+        warn!("Spawn display failed: {:?}", e);
+    }
 
     // Extract motors and touch
-    let motor_a = Arc::new(Mutex::new(board.roller_a));
-    //let _motor_b = board.roller_b; // Motor B is on same bus as A, commands sent via A's I2C
+    let motor_a = board.roller_a;
+    let motor_b = board.roller_b;
     let touch = board.touch;
 
-    // Poll Motor A (Motor B shares the same I2C1 bus, commanded via Motor A's i2c field)
-    spawner.must_spawn(run_touch_reader(touch));
-    spawner.must_spawn(run_motor_a_reader(motor_a.clone()));
-    spawner.must_spawn(run_motor_a_reset(motor_a));
+    // Spawn motor background task with speed filtering
+    let speed_filter_a = Some(MotorValueFilter::new(0.75, 0.3, 0.05));
+    if let Err(e) = spawner.spawn(run_motor_background("A", motor_a.clone(), speed_filter_a)) {
+        warn!("Spawn motor A failed: {:?}", e);
+    }
 
-    info!("Motor A and Motor B on shared I2C1 Port A, Touch on I2C0");
+    let speed_filter_b = Some(MotorValueFilter::new(0.75, 0.3, 0.05));
+    if let Err(e) = spawner.spawn(run_motor_background("B", motor_b.clone(), speed_filter_b)) {
+        warn!("Spawn motor B failed: {:?}", e);
+    }
+    
+    // Spawn motor reset handler (business logic)
+    if let Err(e) = spawner.spawn(run_motor_reset_handler(motor_a)) {
+        warn!("Spawn motor reset handler failed: {:?}", e);
+    }
+    
+    // Wrap touch in SharedFT6336 with telemetry sender via Watch
+    let shared_touch = m5_minimal::hardware::SharedFT6336::new(
+        touch,
+        Some(TelemetrySender::from_watch(&TOUCH_CH)),
+    );
+    
+    // Spawn touch reader background task
+    if let Err(e) = spawner.spawn(run_touch_reader(shared_touch)) {
+        warn!("Spawn touch reader failed: {:?}", e);
+    }
+    
+    // Spawn touch event handler (business logic) - responds to Press events
+    if let Err(e) = spawner.spawn(run_touch_handler()) {
+        warn!("Spawn touch handler failed: {:?}", e);
+    }
+
+    info!("Motor A (0x65) and Motor B (0x64) on shared I2C1 Port B, Touch on I2C0");
 
     // Idle loop
     loop {
@@ -106,116 +144,59 @@ async fn main(spawner: Spawner) -> ! {
     }
 }
 
-/// Task: read Motor A encoder and publish angle updates
-#[embassy_executor::task]
-async fn run_motor_a_reader(
-    motor: Arc<
-        Mutex<
-            CriticalSectionRawMutex,
-            m5_minimal::hardware::Roller485<esp_hal::i2c::master::I2c<'static, esp_hal::Blocking>>,
-        >,
-    >,
+/// Task: run the motor background polling and command processing
+#[embassy_executor::task(pool_size = 2)]
+async fn run_motor_background(
+    name: &'static str,
+    motor: m5_minimal::hardware::SharedRoller485<m5_minimal::hardware::RollerI2cDevice>,
+    speed_filter: Option<MotorValueFilter>,
 ) {
-    info!("Motor A reader: start (I2C1, addr=0x64)");
-
-    // Ensure encoder mode once on startup
-    {
-        let mut guard = motor.lock().await;
-        let _ = guard.ensure_encoder_mode();
-    }
-
-    let mut original_angle = 0;
-    let mut first_position_sent = false;
-    let angle_sender = ANGLE_A_CH.sender();
-    let speed_sender = SPEED_A_CH.sender();
-
-    let mut speed_filter = MotorValueFilter::new(0.75, 0.3, 0.05);
-
-    loop {
-        {
-            let mut guard = motor.lock().await;
-            match guard.read_encoder_position() {
-                Ok(steps) => {
-                    let angle = ((steps % 333 + 333) % 333) * 360 / 333;
-                    if (!first_position_sent) || (angle != original_angle) {
-                        info!("Motor position: steps={}, angle={}°", steps, angle);
-                        let _ = angle_sender.send(angle as u16);
-                        first_position_sent = true;
-                        original_angle = angle;
-                    }
-                }
-                Err(e) if !first_position_sent => warn!("Motor read error: {:?}", e),
-                Err(_) => {}
-            }
-            match guard.read_speed_rpm() {
-                Ok(rpm) => {
-                    if let Some(rpm) = speed_filter.update(rpm) {
-                        info!("Motor speed: {} RPM", rpm);
-                        let _ = speed_sender.send(rpm);
-                    }
-                }
-                Err(e) => {
-                    warn!("Motor speed read error: {:?}", e);
-                }
-            }
-        }
-
-        Timer::after(Duration::from_millis(25)).await;
-    }
+    info!("Motor {} background task starting", name);
+    motor.run_background_task(speed_filter).await;
 }
 
-/// Task: handle Motor A reset-to-zero flow
+/// Task: handle motor reset to zero (business logic)
 #[embassy_executor::task]
-async fn run_motor_a_reset(
-    motor: Arc<
-        Mutex<
-            CriticalSectionRawMutex,
-            m5_minimal::hardware::Roller485<esp_hal::i2c::master::I2c<'static, esp_hal::Blocking>>,
-        >,
-    >,
+async fn run_motor_reset_handler(
+    motor: m5_minimal::hardware::SharedRoller485<m5_minimal::hardware::RollerI2cDevice>,
 ) {
-    info!("Motor A reset: start (I2C1, addr=0x64)");
+    info!("Motor reset handler starting");
 
     let mut angle_receiver = ANGLE_A_CH
         .receiver()
-        .expect("Could not register angle receiver for Motor A reset");
-
+        .expect("Need angle receiver for reset handler");
     let mut speed_receiver = SPEED_A_CH
         .receiver()
-        .expect("Could not register speed receiver for Motor A reset");
+        .expect("Need speed receiver for reset handler");
 
     loop {
-        // Process reset requests, this is not a state, but just a trigger
+        // Wait for reset request
+        MOTOR_A_RESET.receive().await;
 
-        // nu transformeren zonder state machine
-        MOTOR_A_RESET.receive().await; // only true values are sent ;-)
+        info!("Reset to zero requested");
 
+        // Check if already at zero
         if angle_receiver.get().await == 0 {
-            // already at zero, skip
+            info!("Already at zero position");
             continue;
         }
 
-        // we need to move, so lets move to position 0
-        {
-            let mut guard = motor.lock().await;
-            let _ = guard.set_position(0);
-        } // lock is released here
+        // Move to position 0
+        motor.send_command(m5_minimal::hardware::MotorCommand::SetPosition(0)).await;
 
-        info!("Waiting for speed to reach nonZero...");
+        // Wait for movement to start
+        info!("Waiting for movement to start...");
         let _ = speed_receiver.changed_and(|v| v.abs() > 0.2f32).await;
 
-        info!("Waiting for speed to reach 0...");
+        // Wait for movement to complete
+        info!("Waiting for movement to stop...");
         let _ = speed_receiver.changed_and(|v| *v == 0.0f32).await;
 
         Timer::after(Duration::from_millis(100)).await;
 
-        {
-            let mut guard = motor.lock().await;
-            let _ = guard.ensure_encoder_mode();
-        } // lock is released here
+        motor.send_command(m5_minimal::hardware::MotorCommand::SetReading).await;
 
-        info!("Motor A reset to zero complete.");
-
+        info!("Reset to zero complete");
     }
 }
 
@@ -251,32 +232,43 @@ async fn run_display(mut display: Display<m5_minimal::hardware::CoreS3Display<'s
     }
 }
 
-/// Task: Read touch events from FT6336 and log them
+/// Task: Read touch events via SharedFT6336
 #[embassy_executor::task]
 async fn run_touch_reader(
-    mut touch: m5_minimal::hardware::FT6336<esp_hal::i2c::master::I2c<'static, esp_hal::Blocking>>,
+    shared_touch: m5_minimal::hardware::SharedFT6336<
+        esp_hal::i2c::master::I2c<'static, esp_hal::Blocking>,
+        4,
+    >,
 ) {
     info!("Touch reader task starting...");
 
+    // Run the background task for continuous polling and telemetry
+    shared_touch.run_background_task().await
+}
+
+/// Business logic: Respond to touch events
+#[embassy_executor::task]
+async fn run_touch_handler() {
+    info!("Touch handler task starting...");
+    let mut receiver = TOUCH_CH
+        .receiver()
+        .expect("Need touch receiver for handler");
+
     loop {
-        if let Ok(Some(point)) = touch.read_touch() {
-            match point.event {
-                m5_minimal::hardware::TouchEvent::Press => {
-                    info!("TOUCH PRESS: x={}, y={}", point.x, point.y);
-                    let _ = MOTOR_A_RESET.try_send(true);
-                }
-                m5_minimal::hardware::TouchEvent::Contact => {
-                    // Only log contact occasionally to avoid spam
-                    // info!("Touch contact: x={}, y={}", point.x, point.y);
-                }
-                m5_minimal::hardware::TouchEvent::Release => {
-                    info!("TOUCH RELEASE");
-                    // now we want motor A to go to potition 0
-                }
+        let point = receiver.changed().await;
+        match point.event {
+            m5_minimal::hardware::TouchEvent::Press => {
+                info!("TOUCH PRESS at ({}, {}), triggering motor reset", point.x, point.y);
+                // Trigger reset-to-zero business logic
+                let _ = MOTOR_A_RESET.try_send(());
+            }
+            m5_minimal::hardware::TouchEvent::Contact => {
+                // Only log contact occasionally to avoid spam
+                // info!("Touch contact: x={}, y={}", point.x, point.y);
+            }
+            m5_minimal::hardware::TouchEvent::Release => {
+                info!("TOUCH RELEASE");
             }
         }
-
-        // Poll touch at ~100Hz
-        Timer::after(Duration::from_millis(10)).await;
     }
 }
