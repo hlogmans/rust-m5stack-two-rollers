@@ -7,5 +7,6 @@ pub mod hardware;
 pub mod filters;
 pub mod helpers;
 pub mod log;
+pub mod ui;
 
 extern crate alloc;

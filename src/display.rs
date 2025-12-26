@@ -1,14 +1,13 @@
-/// Display abstraction for M5CoreS3
-///
-/// This module provides a hardware abstraction for the M5CoreS3 display,
-/// following the principle of separating business logic from hardware details.
+/// Display abstraction for M5Stack CoreS3
+/// 
+/// Hardware initialization and driver management.
+/// UI rendering is handled by the `ui` module (MVVM architecture).
 ///
 /// The M5CoreS3 uses an ILI9342C display controller (320x240) connected via SPI.
 ///
-/// Pin configuration (based on esp-bsp):
+/// Pin configuration:
 /// - MOSI: GPIO37
 /// - SCK: GPIO36
-/// - MISO: GPIO35 (Note: same as DC, but MISO not used for display)
 /// - CS: GPIO3
 /// - DC: GPIO35 (Data/Command)
 /// - RST: GPIO15 (Reset)
@@ -16,10 +15,8 @@
 
 use embedded_graphics::pixelcolor::Rgb565;
 use embedded_graphics::prelude::*;
-use embedded_graphics::primitives::{Circle, PrimitiveStyle, PrimitiveStyleBuilder, Rectangle};
-use embedded_graphics::mono_font::{ascii::FONT_10X20, MonoTextStyle};
-use embedded_graphics::text::{Alignment, Text};
-use defmt::info;
+use crate::info;
+use crate::ui::{DashboardViewModel, DashboardView};
 use embedded_hal_bus::spi::ExclusiveDevice;
 use esp_hal::delay::Delay;
 use esp_hal::gpio::{Level, Output, OutputConfig};
@@ -28,11 +25,10 @@ use esp_hal::spi::Mode;
 use esp_hal::time::Rate;
 use mipidsi::interface::SpiInterface;
 use mipidsi::{models::ILI9342CRgb565, Builder};
-use core::fmt::Write;
 
 // M5CoreS3 display dimensions
-pub const W: i32 = 320;
-pub const H: i32 = 240;
+pub const W: u32 = 320;
+pub const H: u32 = 240;
 
 /// Raw peripherals required to build the display for the M5CoreS3
 pub struct DisplayPeripherals<'a> {
@@ -96,200 +92,50 @@ pub fn init<'a>(
         .expect("Failed to initialize display");
 
     info!("Display initialization complete");
-    // Wrap in our high-level Display facade
-    Display {
-        inner: display,
-        last_center_angle: None,
-        last_a: None,
-        last_b: None,
-    }
+    
+    // Wrap in our high-level Display facade with MVVM support
+    Display::new(display, W, H)
 }
 
-/// Simple high-level facade hiding low-level embedded-graphics usage.
+/// Display wrapper with MVVM architecture support
 pub struct Display<D: DrawTarget<Color = Rgb565>> {
-    inner: D,
-    // Cached values to avoid unnecessary redraws/flicker
-    last_center_angle: Option<u16>,
-    last_a: Option<u16>,
-    last_b: Option<u16>,
+    driver: D,
+    view_model: DashboardViewModel,
+    view: DashboardView,
 }
 
 impl<D: DrawTarget<Color = Rgb565>> Display<D> {
-    /// Fill the screen with a color.
-    pub fn clear_color(&mut self, color: Rgb565) {
-        let area = Rectangle::new(Point::zero(), Size::new(W as u32, H as u32));
-        let _ = area.into_styled(PrimitiveStyle::with_fill(color))
-            .draw(&mut self.inner);
+    /// Create a new display wrapper with MVVM support
+    pub fn new(driver: D, width: u32, height: u32) -> Self {
+        let view_model = DashboardViewModel::new();
+        let view = DashboardView::new(width, height);
+        Self {
+            driver,
+            view_model,
+            view,
+        }
     }
 
-    /// Draw a circle with a stroke at the specified position
-    ///
-    /// # Arguments
-    /// * `center` - The center point of the circle
-    /// * `diameter` - The diameter of the circle
-    /// * `stroke_color` - The color of the circle stroke
-    /// * `stroke_width` - The width of the stroke
-    pub fn draw_circle(&mut self, center: Point, diameter: u32, stroke_color: Rgb565, stroke_width: u32) {
-        let style = PrimitiveStyleBuilder::new()
-            .stroke_color(stroke_color)
-            .stroke_width(stroke_width)
-            .build();
-        
-        let _ = Circle::new(
-            Point::new(center.x - diameter as i32 / 2, center.y - diameter as i32 / 2),
-            diameter,
-        )
-        .into_styled(style)
-        .draw(&mut self.inner);
-    }
-
-    /// Draw centered text at the specified position
-    ///
-    /// # Arguments
-    /// * `text` - The text to display
-    /// * `position` - The center position for the text
-    /// * `color` - The text color
-    pub fn draw_centered_text(&mut self, text: &str, position: Point, color: Rgb565) {
-        let style = MonoTextStyle::new(&FONT_10X20, color);
-        
-        let _ = Text::with_alignment(
-            text,
-            position,
-            style,
-            Alignment::Center,
-        )
-        .draw(&mut self.inner);
-    }
-
-    /// Initialize the angle display: draw the background and circles once
-    ///
-    /// Call this once at startup before calling update_angle_text
+    /// Initialize UI (render static elements)
     pub fn init_angle_display(&mut self) {
-        // Clear screen to black
-        self.clear_color(colors::black());
-        
-        // Calculate center of screen
-        let center = Point::new(W / 2, H / 2);
-        
-        // Draw outer circle (diameter: 180 pixels)
-        self.draw_circle(center, 180, colors::cyan(), 4);
-        
-        // Draw inner circle (diameter: 140 pixels)
-        self.draw_circle(center, 140, colors::blue(), 2);
+        info!("Initializing dashboard UI (MVVM)");
+        let _ = self.view.init(&mut self.driver);
 
-        // Reset cached text values
-        self.last_center_angle = None;
-        self.last_a = None;
-        self.last_b = None;
+        let _ = self.view.update(&mut self.driver, &self.view_model, true);
     }
 
-    /// Update only the angle text in the center (efficient, no flicker)
-    ///
-    /// # Arguments
-    /// * `angle` - The angle value to display (0-360)
-    /// * `color` - The color to use for the text
-    pub fn update_angle_text(&mut self, angle: u16, color: Rgb565) {
-        // Skip if unchanged to prevent flicker
-        if self.last_center_angle == Some(angle) {
-            return;
-        }
-        // Calculate center of screen
-        let center = Point::new(W / 2, H / 2);
-        
-        // Erase previous text by overdrawing it in black (glyph only)
-        if let Some(prev) = self.last_center_angle {
-            let mut prev_buf = heapless::String::<8>::new();
-            // Use plain number without unsupported degree symbol
-            let _ = write!(prev_buf, "{}", prev);
-            self.draw_centered_text(&prev_buf, center, colors::black());
-        }
-
-        // Draw the new angle value centered
-        let mut buffer = heapless::String::<8>::new();
-        let _ = write!(buffer, "{}", angle);
-        self.draw_centered_text(&buffer, center, color);
-
-        // Update cache
-        self.last_center_angle = Some(angle);
-    }
-
-    /// Update two angle readouts labeled A and B
-    ///
-    /// Draws two compact labels centered vertically around the middle.
-    /// Clears only the small regions to avoid flicker.
+    /// Update display with dual motor angles (MVVM pattern)
     pub fn update_dual_angles(&mut self, angle_a: u16, angle_b: u16) {
-        let center = Point::new(W / 2, H / 2);
-        
-        // Positions: slightly above/below center
-        let pos_a = Point::new(center.x, center.y - 20);
-        let pos_b = Point::new(center.x, center.y + 20);
+        // Update ViewModel (business/presentation state)
+        self.view_model.update_motor_a_angle(angle_a);
+        self.view_model.update_motor_b_angle(angle_b);
 
-        // Update A
-        if self.should_update_cached(self.last_a, angle_a) {
-            self.erase_and_draw_labeled_angle("A", self.last_a, angle_a, pos_a);
-            self.last_a = Some(angle_a);
-        }
-
-        // Update B
-        if self.should_update_cached(self.last_b, angle_b) {
-            self.erase_and_draw_labeled_angle("B", self.last_b, angle_b, pos_b);
-            self.last_b = Some(angle_b);
-        }
+        // Render ViewModel to screen (View layer)
+        let _ = self.view.update(&mut self.driver, &self.view_model, false);
     }
 
-    /// Check if a cached value needs updating
-    #[inline]
-    fn should_update_cached(&self, cached: Option<u16>, new_value: u16) -> bool {
-        cached.map(|v| v != new_value).unwrap_or(true)
-    }
-
-    /// Erase previous labeled angle and draw new one
-    fn erase_and_draw_labeled_angle(&mut self, label: &str, prev: Option<u16>, angle: u16, position: Point) {
-        // Erase previous text if it exists
-        if let Some(prev_val) = prev {
-            let mut prev_buf = heapless::String::<16>::new();
-            let _ = write!(prev_buf, "{}: {}", label, prev_val);
-            self.draw_centered_text(&prev_buf, position, colors::black());
-        }
-        
-        // Draw new text
-        let mut buf = heapless::String::<16>::new();
-        let _ = write!(buf, "{}: {}", label, angle);
-        self.draw_centered_text(&buf, position, colors::white());
-    }
-
-    /// Expose screen size for convenience.
-    pub fn size(&self) -> (i32, i32) {
-        (W, H)
-    }
-}
-
-/// Color helper functions
-pub mod colors {
-    use embedded_graphics::pixelcolor::Rgb565;
-    use embedded_graphics::prelude::RgbColor;
-
-    pub fn red() -> Rgb565 {
-        Rgb565::RED
-    }
-
-    pub fn green() -> Rgb565 {
-        Rgb565::GREEN
-    }
-
-    pub fn blue() -> Rgb565 {
-        Rgb565::BLUE
-    }
-
-    pub fn white() -> Rgb565 {
-        Rgb565::WHITE
-    }
-
-    pub fn black() -> Rgb565 {
-        Rgb565::BLACK
-    }
-
-    pub fn cyan() -> Rgb565 {
-        Rgb565::CYAN
+    /// Get mutable reference to view model (for future extensions)
+    pub fn view_model_mut(&mut self) -> &mut DashboardViewModel {
+        &mut self.view_model
     }
 }
