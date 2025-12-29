@@ -12,6 +12,12 @@ pub mod view_models;
 pub mod views;
 pub mod framework;
 pub mod screen;
+pub mod buttons;
+pub mod screen_trait;
+pub mod display_service;
+
+pub use screen_trait::{ScreenController, ScreenEvent};
+pub use display_service::DisplayService;
 
 pub use view_models::{DashboardViewModel, MotorViewModel};
 pub use views::{DashboardView, SplashView};

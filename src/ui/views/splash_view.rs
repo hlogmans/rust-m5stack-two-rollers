@@ -10,21 +10,27 @@ use embedded_graphics::{
     text::{Alignment, Text},
 };
 
+use crate::ui::buttons::ButtonSpec;
+use crate::ui::screen_trait::{ScreenController, ScreenEvent};
+use crate::hardware::CoreS3Display;
+
 /// Splash screen view (framework-specific rendering)
 pub struct SplashView {
     /// Display bounds
     bounds: Rectangle,
+    /// Current countdown value
+    countdown: u8,
 }
 
 impl SplashView {
     /// Create a new splash view for the given display size
     pub fn new(width: u32, height: u32) -> Self {
         let bounds = Rectangle::new(Point::zero(), Size::new(width, height));
-        Self { bounds }
+        Self { bounds, countdown: 4 }
     }
 
     /// Initialize the splash screen (draw static elements)
-    pub fn init<D>(&self, target: &mut D) -> Result<(), D::Error>
+    fn init<D>(&self, target: &mut D) -> Result<(), D::Error>
     where
         D: DrawTarget<Color = Rgb565>,
     {
@@ -69,7 +75,7 @@ impl SplashView {
     }
 
     /// Update the countdown timer
-    pub fn update_countdown<D>(&self, target: &mut D, seconds_left: u8) -> Result<(), D::Error>
+    fn update_countdown<D>(&self, target: &mut D, seconds_left: u8) -> Result<(), D::Error>
     where
         D: DrawTarget<Color = Rgb565>,
     {
@@ -94,3 +100,33 @@ impl SplashView {
         Ok(())
     }
 }
+
+impl ScreenController for SplashView {
+    type Driver = CoreS3Display<'static>;
+
+    fn open(&mut self, display: &mut Self::Driver) -> Result<&[ButtonSpec], <Self::Driver as DrawTarget>::Error> {
+        self.init(display)?;
+        self.update_countdown(display, self.countdown)?;
+        Ok(&[])
+    }
+
+    fn update(&mut self, display: &mut Self::Driver, event: ScreenEvent) -> Result<(), <Self::Driver as DrawTarget>::Error> {
+        match event {
+            ScreenEvent::Countdown(value) => {
+                self.countdown = value;
+                self.update_countdown(display, value)?;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn close(&mut self, _display: &mut Self::Driver) -> Result<(), <Self::Driver as DrawTarget>::Error> {
+        Ok(())
+    }
+
+    fn buttons(&self) -> &[ButtonSpec] {
+        &[]
+    }
+}
+

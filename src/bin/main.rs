@@ -16,14 +16,14 @@ use esp_backtrace as _; // provides panic handler with backtrace via esp-println
 
 use alloc::boxed::Box;
 use embassy_executor::Spawner;
-use embassy_futures::select;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
 use embassy_sync::watch::Watch;
 use embassy_time::{Duration, Timer};
 use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
-use m5_minimal::display::Display;
+use m5_minimal::ui::DisplayService;
+use m5_minimal::business::input;
 use m5_minimal::filters::MotorValueFilter;
 
 
@@ -98,10 +98,16 @@ async fn main(spawner: Spawner) -> ! {
     )
     .await;
 
-    // Spawn display task to render angle updates
-    let display = board.display;
-    if let Err(e) = spawner.spawn(run_display(display)) {
-        warn!("Spawn display failed: {:?}", e);
+    // Spawn DisplayService to manage screens and rendering
+    let display_service = DisplayService::new(board.display);
+    if let Err(e) = spawner.spawn(run_display_service(
+        display_service,
+        &SCREEN_CH,
+        &COUNTDOWN_CH,
+        &ANGLE_A_CH,
+        &ANGLE_B_CH,
+    )) {
+        warn!("Spawn display service failed: {:?}", e);
     }
 
     // Spawn navigation task to manage screen transitions
@@ -126,11 +132,23 @@ async fn main(spawner: Spawner) -> ! {
     }
     
     // Spawn motor reset handlers (business logic)
-    if let Err(e) = spawner.spawn(run_motor_reset_handler_a(motor_a)) {
+    if let Err(e) = spawner.spawn(run_motor_reset_handler(
+        "A",
+        motor_a,
+        &ANGLE_A_CH,
+        &SPEED_A_CH,
+        &MOTOR_A_RESET,
+    )) {
         warn!("Spawn motor A reset handler failed: {:?}", e);
     }
 
-    if let Err(e) = spawner.spawn(run_motor_reset_handler_b(motor_b)) {
+    if let Err(e) = spawner.spawn(run_motor_reset_handler(
+        "B",
+        motor_b,
+        &ANGLE_B_CH,
+        &SPEED_B_CH,
+        &MOTOR_B_RESET,
+    )) {
         warn!("Spawn motor B reset handler failed: {:?}", e);
     }
     
@@ -145,9 +163,12 @@ async fn main(spawner: Spawner) -> ! {
         warn!("Spawn touch reader failed: {:?}", e);
     }
     
-    // Spawn touch event handler (business logic) - responds to Press events
-    if let Err(e) = spawner.spawn(run_touch_handler()) {
-        warn!("Spawn touch handler failed: {:?}", e);
+    // Spawn button router and action handler (business logic)
+    if let Err(e) = spawner.spawn(input::run_button_router(&TOUCH_CH)) {
+        warn!("Spawn button router failed: {:?}", e);
+    }
+    if let Err(e) = spawner.spawn(input::run_button_actions(&MOTOR_A_RESET, &MOTOR_B_RESET)) {
+        warn!("Spawn button actions failed: {:?}", e);
     }
 
     info!("Motor A (0x65) and Motor B (0x64) on shared I2C1 Port B, Touch on I2C0");
@@ -169,171 +190,63 @@ async fn run_motor_background(
     motor.run_background_task(speed_filter).await;
 }
 
-/// Task: handle motor A reset to zero (business logic)
-#[embassy_executor::task]
-async fn run_motor_reset_handler_a(
+/// Task: handle motor reset to zero (business logic) - generic for A/B
+#[embassy_executor::task(pool_size = 2)]
+async fn run_motor_reset_handler(
+    name: &'static str,
     motor: m5_minimal::hardware::SharedRoller485<m5_minimal::hardware::RollerI2cDevice>,
+    angle_watch: &'static Watch<CriticalSectionRawMutex, u16, 8>,
+    speed_watch: &'static Watch<CriticalSectionRawMutex, f32, 4>,
+    reset_ch: &'static Channel<CriticalSectionRawMutex, (), 1>,
 ) {
-    info!("Motor A reset handler starting");
+    info!("Motor {} reset handler starting", name);
 
-    let mut angle_receiver = ANGLE_A_CH
+    let mut angle_receiver = angle_watch
         .receiver()
         .expect("Need angle receiver for reset handler");
-    let mut speed_receiver = SPEED_A_CH
+    let mut speed_receiver = speed_watch
         .receiver()
         .expect("Need speed receiver for reset handler");
 
     loop {
-        MOTOR_A_RESET.receive().await;
+        reset_ch.receive().await;
 
-        info!("Reset A to zero requested");
+        info!("Reset {} to zero requested", name);
 
         if angle_receiver.get().await == 0 {
-            info!("A already at zero");
+            info!("{} already at zero", name);
             continue;
         }
 
-        motor.send_command(m5_minimal::hardware::MotorCommand::SetPosition(0)).await;
+        motor
+            .send_command(m5_minimal::hardware::MotorCommand::SetPosition(0))
+            .await;
 
-        info!("Waiting A movement start...");
+        info!("Waiting {} movement start...", name);
         let _ = speed_receiver.changed_and(|v| v.abs() > 0.2f32).await;
 
-        info!("Waiting A movement stop...");
+        info!("Waiting {} movement stop...", name);
         let _ = speed_receiver.changed_and(|v| *v == 0.0f32).await;
 
         Timer::after(Duration::from_millis(100)).await;
-        motor.send_command(m5_minimal::hardware::MotorCommand::SetReading).await;
+        motor
+            .send_command(m5_minimal::hardware::MotorCommand::SetReading)
+            .await;
 
-        info!("Reset A complete");
+        info!("Reset {} complete", name);
     }
 }
 
-/// Task: handle motor B reset to zero (business logic)
+/// Task: Display service - manages screens, navigation, and button registration
 #[embassy_executor::task]
-async fn run_motor_reset_handler_b(
-    motor: m5_minimal::hardware::SharedRoller485<m5_minimal::hardware::RollerI2cDevice>,
+async fn run_display_service(
+    service: DisplayService,
+    screen_watch: &'static Watch<CriticalSectionRawMutex, m5_minimal::ui::Screen, 4>,
+    countdown_watch: &'static Watch<CriticalSectionRawMutex, u8, 4>,
+    angle_a_watch: &'static Watch<CriticalSectionRawMutex, u16, 8>,
+    angle_b_watch: &'static Watch<CriticalSectionRawMutex, u16, 8>,
 ) {
-    info!("Motor B reset handler starting");
-
-    let mut angle_receiver = ANGLE_B_CH
-        .receiver()
-        .expect("Need angle receiver for reset handler B");
-    let mut speed_receiver = SPEED_B_CH
-        .receiver()
-        .expect("Need speed receiver for reset handler B");
-
-    loop {
-        MOTOR_B_RESET.receive().await;
-
-        info!("Reset B to zero requested");
-
-        if angle_receiver.get().await == 0 {
-            info!("B already at zero");
-            continue;
-        }
-
-        motor.send_command(m5_minimal::hardware::MotorCommand::SetPosition(0)).await;
-
-        info!("Waiting B movement start...");
-        let _ = speed_receiver.changed_and(|v| v.abs() > 0.2f32).await;
-
-        info!("Waiting B movement stop...");
-        let _ = speed_receiver.changed_and(|v| *v == 0.0f32).await;
-
-        Timer::after(Duration::from_millis(100)).await;
-        motor.send_command(m5_minimal::hardware::MotorCommand::SetReading).await;
-
-        info!("Reset B complete");
-    }
-}
-
-/// Task: render angle on the display using embedded-graphics
-#[embassy_executor::task]
-async fn run_display(mut display: Display<m5_minimal::hardware::CoreS3Display<'static>>) {
-    use m5_minimal::ui::{SplashView, Screen};
-    use embedded_graphics::prelude::*;
-    use embedded_graphics::pixelcolor::Rgb565;
-    
-    info!("Display task: waiting for screen navigation");
-    
-    let mut screen_receiver = SCREEN_CH
-        .receiver()
-        .expect("Could not register screen receiver");
-    let mut countdown_receiver = COUNTDOWN_CH
-        .receiver()
-        .expect("Could not register countdown receiver");
-    
-    // Create views
-    let splash = SplashView::new(320, 240);
-    
-    let mut current_screen = Screen::Splash;
-    let mut last_a: u16 = 0;
-    let mut last_b: u16 = 0;
-    let mut last_countdown: u8 = 4;
-
-    let mut receiver_a = ANGLE_A_CH
-        .receiver()
-        .expect("Could not register receiver A");
-    let mut receiver_b = ANGLE_B_CH
-        .receiver()
-        .expect("Could not register receiver B");
-
-    // Initialize splash screen
-    let driver = display.driver_mut();
-    let _ = driver.clear(Rgb565::BLACK);
-    let _ = splash.init(driver);
-    let _ = splash.update_countdown(driver, last_countdown);
-
-    loop {
-        // Wait for either screen change, countdown update, or angle update
-        let event = select::select4(
-            screen_receiver.changed(),
-            countdown_receiver.changed(),
-            receiver_a.changed(),
-            receiver_b.changed(),
-        ).await;
-        
-        match event {
-            select::Either4::First(screen) => {
-                // Screen changed
-                if screen != current_screen {
-                    current_screen = screen;
-                    
-                    match current_screen {
-                        Screen::Splash => {
-                            let driver = display.driver_mut();
-                            let _ = driver.clear(Rgb565::BLACK);
-                            let _ = splash.init(driver);
-                            let _ = splash.update_countdown(driver, last_countdown);
-                        }
-                        Screen::Dashboard => {
-                            display.init_angle_display();
-                            display.update_dual_angles(last_a, last_b);
-                        }
-                    }
-                }
-            }
-            select::Either4::Second(countdown) => {
-                // Countdown updated
-                last_countdown = countdown;
-                if current_screen == Screen::Splash {
-                    let _ = splash.update_countdown(display.driver_mut(), last_countdown);
-                }
-            }
-            select::Either4::Third(a) => {
-                last_a = a;
-                if current_screen == Screen::Dashboard {
-                    display.update_dual_angles(last_a, last_b);
-                }
-            }
-            select::Either4::Fourth(b) => {
-                last_b = b;
-                if current_screen == Screen::Dashboard {
-                    display.update_dual_angles(last_a, last_b);
-                }
-            }
-        }
-    }
+    service.run(screen_watch, countdown_watch, angle_a_watch, angle_b_watch).await;
 }
 
 /// Task: Manage screen navigation (splash -> dashboard)
@@ -376,53 +289,4 @@ async fn run_touch_reader(
     shared_touch.run_background_task().await
 }
 
-/// Business logic: Respond to touch events
-#[embassy_executor::task]
-async fn run_touch_handler() {
-    info!("Touch handler task starting...");
-    let mut receiver = TOUCH_CH
-        .receiver()
-        .expect("Need touch receiver for handler");
-
-    // Button hitboxes
-    // Motor A button: left gauge area
-    const BTN_A_X1: u16 = 20;
-    const BTN_A_X2: u16 = 140;
-    const BTN_A_Y1: u16 = 200;
-    const BTN_A_Y2: u16 = 235;
-
-    // Motor B button: right gauge area
-    const BTN_B_X1: u16 = 180;
-    const BTN_B_X2: u16 = 300;
-    const BTN_B_Y1: u16 = 200;
-    const BTN_B_Y2: u16 = 235;
-
-    loop {
-        let point = receiver.changed().await;
-        match point.event {
-            m5_minimal::hardware::TouchEvent::Press => {
-                info!("TOUCH PRESS at ({}, {})", point.x, point.y);
-
-                let in_btn_a = point.x >= BTN_A_X1 && point.x <= BTN_A_X2 && point.y >= BTN_A_Y1 && point.y <= BTN_A_Y2;
-                let in_btn_b = point.x >= BTN_B_X1 && point.x <= BTN_B_X2 && point.y >= BTN_B_Y1 && point.y <= BTN_B_Y2;
-
-                if in_btn_a {
-                    info!("Trigger reset Motor A");
-                    let _ = MOTOR_A_RESET.try_send(());
-                } else if in_btn_b {
-                    info!("Trigger reset Motor B");
-                    let _ = MOTOR_B_RESET.try_send(());
-                } else {
-                    info!("Touch outside reset buttons");
-                }
-            }
-            m5_minimal::hardware::TouchEvent::Contact => {
-                // Only log contact occasionally to avoid spam
-                // info!("Touch contact: x={}, y={}", point.x, point.y);
-            }
-            m5_minimal::hardware::TouchEvent::Release => {
-                info!("TOUCH RELEASE");
-            }
-        }
-    }
-}
+// touch handler removed in favor of business::input routing

@@ -5,6 +5,7 @@
 
 pub mod angle_controller;
 pub mod evaluator;
+pub mod input;
 
 pub use angle_controller::AngleController;
 pub use evaluator::{EvaluationStatus, Evaluator, ThresholdEvaluator};
