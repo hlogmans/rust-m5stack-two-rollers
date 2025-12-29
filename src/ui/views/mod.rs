@@ -5,6 +5,8 @@
 
 mod dashboard_view;
 mod motor_view;
+mod splash_view;
 
 pub use dashboard_view::DashboardView;
 pub use motor_view::MotorView;
+pub use splash_view::SplashView;

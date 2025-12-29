@@ -116,6 +116,11 @@ impl<D: DrawTarget<Color = Rgb565>> Display<D> {
         }
     }
 
+    /// Get a mutable reference to the underlying driver for custom rendering
+    pub fn driver_mut(&mut self) -> &mut D {
+        &mut self.driver
+    }
+
     /// Initialize UI (render static elements)
     pub fn init_angle_display(&mut self) {
         info!("Initializing dashboard UI (MVVM)");

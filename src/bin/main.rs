@@ -44,6 +44,10 @@ static MOTOR_B_CMD: Channel<CriticalSectionRawMutex, m5_minimal::hardware::Motor
 // Touch events
 static TOUCH_CH: Watch<CriticalSectionRawMutex, TouchPoint, 4> = Watch::new();
 
+// Screen navigation
+static SCREEN_CH: Watch<CriticalSectionRawMutex, m5_minimal::ui::Screen, 4> = Watch::new();
+static COUNTDOWN_CH: Watch<CriticalSectionRawMutex, u8, 4> = Watch::new();
+
 // Panic handling is provided by esp-backtrace (print-uart feature) for stack traces
 
 extern crate alloc;
@@ -98,6 +102,11 @@ async fn main(spawner: Spawner) -> ! {
     let display = board.display;
     if let Err(e) = spawner.spawn(run_display(display)) {
         warn!("Spawn display failed: {:?}", e);
+    }
+
+    // Spawn navigation task to manage screen transitions
+    if let Err(e) = spawner.spawn(run_navigation()) {
+        warn!("Spawn navigation failed: {:?}", e);
     }
 
     // Extract motors and touch
@@ -241,11 +250,26 @@ async fn run_motor_reset_handler_b(
 /// Task: render angle on the display using embedded-graphics
 #[embassy_executor::task]
 async fn run_display(mut display: Display<m5_minimal::hardware::CoreS3Display<'static>>) {
-    info!("Display task: init UI");
-    display.init_angle_display();
-
+    use m5_minimal::ui::{SplashView, Screen};
+    use embedded_graphics::prelude::*;
+    use embedded_graphics::pixelcolor::Rgb565;
+    
+    info!("Display task: waiting for screen navigation");
+    
+    let mut screen_receiver = SCREEN_CH
+        .receiver()
+        .expect("Could not register screen receiver");
+    let mut countdown_receiver = COUNTDOWN_CH
+        .receiver()
+        .expect("Could not register countdown receiver");
+    
+    // Create views
+    let splash = SplashView::new(320, 240);
+    
+    let mut current_screen = Screen::Splash;
     let mut last_a: u16 = 0;
     let mut last_b: u16 = 0;
+    let mut last_countdown: u8 = 4;
 
     let mut receiver_a = ANGLE_A_CH
         .receiver()
@@ -254,19 +278,87 @@ async fn run_display(mut display: Display<m5_minimal::hardware::CoreS3Display<'s
         .receiver()
         .expect("Could not register receiver B");
 
+    // Initialize splash screen
+    let driver = display.driver_mut();
+    let _ = driver.clear(Rgb565::BLACK);
+    let _ = splash.init(driver);
+    let _ = splash.update_countdown(driver, last_countdown);
+
     loop {
-        // Wait for either channel to receive a value
-        let event = select::select(receiver_a.changed(), receiver_b.changed()).await;
+        // Wait for either screen change, countdown update, or angle update
+        let event = select::select4(
+            screen_receiver.changed(),
+            countdown_receiver.changed(),
+            receiver_a.changed(),
+            receiver_b.changed(),
+        ).await;
+        
         match event {
-            select::Either::First(a) => {
-                last_a = a;
+            select::Either4::First(screen) => {
+                // Screen changed
+                if screen != current_screen {
+                    current_screen = screen;
+                    
+                    match current_screen {
+                        Screen::Splash => {
+                            let driver = display.driver_mut();
+                            let _ = driver.clear(Rgb565::BLACK);
+                            let _ = splash.init(driver);
+                            let _ = splash.update_countdown(driver, last_countdown);
+                        }
+                        Screen::Dashboard => {
+                            display.init_angle_display();
+                            display.update_dual_angles(last_a, last_b);
+                        }
+                    }
+                }
             }
-            select::Either::Second(b) => {
+            select::Either4::Second(countdown) => {
+                // Countdown updated
+                last_countdown = countdown;
+                if current_screen == Screen::Splash {
+                    let _ = splash.update_countdown(display.driver_mut(), last_countdown);
+                }
+            }
+            select::Either4::Third(a) => {
+                last_a = a;
+                if current_screen == Screen::Dashboard {
+                    display.update_dual_angles(last_a, last_b);
+                }
+            }
+            select::Either4::Fourth(b) => {
                 last_b = b;
+                if current_screen == Screen::Dashboard {
+                    display.update_dual_angles(last_a, last_b);
+                }
             }
         }
+    }
+}
 
-        display.update_dual_angles(last_a, last_b);
+/// Task: Manage screen navigation (splash -> dashboard)
+#[embassy_executor::task]
+async fn run_navigation() {
+    use m5_minimal::ui::Screen;
+    
+    info!("Navigation task: starting splash screen");
+    
+    // Initialize with Splash screen
+    SCREEN_CH.sender().send(Screen::Splash);
+    
+    // Countdown from 4 to 1 seconds
+    for countdown in (1..=4).rev() {
+        COUNTDOWN_CH.sender().send(countdown);
+        Timer::after(Duration::from_secs(1)).await;
+    }
+    
+    // Switch to Dashboard
+    info!("Navigation: switching to dashboard");
+    SCREEN_CH.sender().send(Screen::Dashboard);
+    
+    // Navigation task complete - screen stays on dashboard
+    loop {
+        Timer::after(Duration::from_secs(3600)).await;
     }
 }
 

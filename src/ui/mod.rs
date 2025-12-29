@@ -6,10 +6,13 @@
 //! - `view_models/`: ViewModels hold presentation state (framework-agnostic)
 //! - `views/`: Views render ViewModels to screen (framework-specific)
 //! - `framework/`: Framework abstraction layer (currently embedded-layout)
+//! - `screen`: Navigation types
 
 pub mod view_models;
 pub mod views;
 pub mod framework;
+pub mod screen;
 
 pub use view_models::{DashboardViewModel, MotorViewModel};
-pub use views::DashboardView;
+pub use views::{DashboardView, SplashView};
+pub use screen::Screen;
