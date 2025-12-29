@@ -32,8 +32,9 @@ static ANGLE_A_CH: Watch<CriticalSectionRawMutex, u16, 8> = Watch::new();
 static SPEED_A_CH: Watch<CriticalSectionRawMutex, f32, 4> = Watch::new();
 static MOTOR_A_CMD: Channel<CriticalSectionRawMutex, m5_minimal::hardware::MotorCommand, 4> = Channel::new();
 
-// Business logic: reset trigger
+// Business logic: reset triggers per motor
 static MOTOR_A_RESET: Channel<CriticalSectionRawMutex, (), 1> = Channel::new();
+static MOTOR_B_RESET: Channel<CriticalSectionRawMutex, (), 1> = Channel::new();
 
 // Display gets angle updates for both motors
 static ANGLE_B_CH: Watch<CriticalSectionRawMutex, u16, 8> = Watch::new();
@@ -115,9 +116,13 @@ async fn main(spawner: Spawner) -> ! {
         warn!("Spawn motor B failed: {:?}", e);
     }
     
-    // Spawn motor reset handler (business logic)
-    if let Err(e) = spawner.spawn(run_motor_reset_handler(motor_a)) {
-        warn!("Spawn motor reset handler failed: {:?}", e);
+    // Spawn motor reset handlers (business logic)
+    if let Err(e) = spawner.spawn(run_motor_reset_handler_a(motor_a)) {
+        warn!("Spawn motor A reset handler failed: {:?}", e);
+    }
+
+    if let Err(e) = spawner.spawn(run_motor_reset_handler_b(motor_b)) {
+        warn!("Spawn motor B reset handler failed: {:?}", e);
     }
     
     // Wrap touch in SharedFT6336 with telemetry sender via Watch
@@ -155,12 +160,12 @@ async fn run_motor_background(
     motor.run_background_task(speed_filter).await;
 }
 
-/// Task: handle motor reset to zero (business logic)
+/// Task: handle motor A reset to zero (business logic)
 #[embassy_executor::task]
-async fn run_motor_reset_handler(
+async fn run_motor_reset_handler_a(
     motor: m5_minimal::hardware::SharedRoller485<m5_minimal::hardware::RollerI2cDevice>,
 ) {
-    info!("Motor reset handler starting");
+    info!("Motor A reset handler starting");
 
     let mut angle_receiver = ANGLE_A_CH
         .receiver()
@@ -170,33 +175,66 @@ async fn run_motor_reset_handler(
         .expect("Need speed receiver for reset handler");
 
     loop {
-        // Wait for reset request
         MOTOR_A_RESET.receive().await;
 
-        info!("Reset to zero requested");
+        info!("Reset A to zero requested");
 
-        // Check if already at zero
         if angle_receiver.get().await == 0 {
-            info!("Already at zero position");
+            info!("A already at zero");
             continue;
         }
 
-        // Move to position 0
         motor.send_command(m5_minimal::hardware::MotorCommand::SetPosition(0)).await;
 
-        // Wait for movement to start
-        info!("Waiting for movement to start...");
+        info!("Waiting A movement start...");
         let _ = speed_receiver.changed_and(|v| v.abs() > 0.2f32).await;
 
-        // Wait for movement to complete
-        info!("Waiting for movement to stop...");
+        info!("Waiting A movement stop...");
         let _ = speed_receiver.changed_and(|v| *v == 0.0f32).await;
 
         Timer::after(Duration::from_millis(100)).await;
-
         motor.send_command(m5_minimal::hardware::MotorCommand::SetReading).await;
 
-        info!("Reset to zero complete");
+        info!("Reset A complete");
+    }
+}
+
+/// Task: handle motor B reset to zero (business logic)
+#[embassy_executor::task]
+async fn run_motor_reset_handler_b(
+    motor: m5_minimal::hardware::SharedRoller485<m5_minimal::hardware::RollerI2cDevice>,
+) {
+    info!("Motor B reset handler starting");
+
+    let mut angle_receiver = ANGLE_B_CH
+        .receiver()
+        .expect("Need angle receiver for reset handler B");
+    let mut speed_receiver = SPEED_B_CH
+        .receiver()
+        .expect("Need speed receiver for reset handler B");
+
+    loop {
+        MOTOR_B_RESET.receive().await;
+
+        info!("Reset B to zero requested");
+
+        if angle_receiver.get().await == 0 {
+            info!("B already at zero");
+            continue;
+        }
+
+        motor.send_command(m5_minimal::hardware::MotorCommand::SetPosition(0)).await;
+
+        info!("Waiting B movement start...");
+        let _ = speed_receiver.changed_and(|v| v.abs() > 0.2f32).await;
+
+        info!("Waiting B movement stop...");
+        let _ = speed_receiver.changed_and(|v| *v == 0.0f32).await;
+
+        Timer::after(Duration::from_millis(100)).await;
+        motor.send_command(m5_minimal::hardware::MotorCommand::SetReading).await;
+
+        info!("Reset B complete");
     }
 }
 
@@ -254,13 +292,37 @@ async fn run_touch_handler() {
         .receiver()
         .expect("Need touch receiver for handler");
 
+    // Button hitboxes
+    // Motor A button: left gauge area
+    const BTN_A_X1: u16 = 20;
+    const BTN_A_X2: u16 = 140;
+    const BTN_A_Y1: u16 = 200;
+    const BTN_A_Y2: u16 = 235;
+
+    // Motor B button: right gauge area
+    const BTN_B_X1: u16 = 180;
+    const BTN_B_X2: u16 = 300;
+    const BTN_B_Y1: u16 = 200;
+    const BTN_B_Y2: u16 = 235;
+
     loop {
         let point = receiver.changed().await;
         match point.event {
             m5_minimal::hardware::TouchEvent::Press => {
-                info!("TOUCH PRESS at ({}, {}), triggering motor reset", point.x, point.y);
-                // Trigger reset-to-zero business logic
-                let _ = MOTOR_A_RESET.try_send(());
+                info!("TOUCH PRESS at ({}, {})", point.x, point.y);
+
+                let in_btn_a = point.x >= BTN_A_X1 && point.x <= BTN_A_X2 && point.y >= BTN_A_Y1 && point.y <= BTN_A_Y2;
+                let in_btn_b = point.x >= BTN_B_X1 && point.x <= BTN_B_X2 && point.y >= BTN_B_Y1 && point.y <= BTN_B_Y2;
+
+                if in_btn_a {
+                    info!("Trigger reset Motor A");
+                    let _ = MOTOR_A_RESET.try_send(());
+                } else if in_btn_b {
+                    info!("Trigger reset Motor B");
+                    let _ = MOTOR_B_RESET.try_send(());
+                } else {
+                    info!("Touch outside reset buttons");
+                }
             }
             m5_minimal::hardware::TouchEvent::Contact => {
                 // Only log contact occasionally to avoid spam

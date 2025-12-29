@@ -8,7 +8,7 @@ use embedded_graphics::{
     mono_font::{MonoTextStyle, ascii::FONT_10X20},
     pixelcolor::Rgb565,
     prelude::*,
-    primitives::Rectangle,
+    primitives::{Rectangle, PrimitiveStyle},
     text::{Alignment, Text},
 };
 
@@ -90,6 +90,35 @@ impl DashboardView {
 
         // Render motor B
         self.motor_b_view.render(target, &view_model.motor_b, initial)?;
+
+        // Draw reset buttons only on initial render (after motors so they're on top)
+        if initial {
+            let btn_style = PrimitiveStyle::with_fill(Rgb565::CSS_BLUE);
+            let btn_style_border = PrimitiveStyle::with_stroke(Rgb565::CSS_YELLOW, 2);
+            let btn_text_style = MonoTextStyle::new(&FONT_10X20, Rgb565::WHITE);
+
+            let btn_a = Rectangle::new(Point::new(20, 200), Size::new(120, 35));
+            btn_a.into_styled(btn_style).draw(target)?;
+            btn_a.into_styled(btn_style_border).draw(target)?;
+            Text::with_alignment(
+                "ZERO A",
+                Point::new(80, 222),
+                btn_text_style,
+                Alignment::Center,
+            )
+            .draw(target)?;
+
+            let btn_b = Rectangle::new(Point::new(180, 200), Size::new(120, 35));
+            btn_b.into_styled(btn_style).draw(target)?;
+            btn_b.into_styled(btn_style_border).draw(target)?;
+            Text::with_alignment(
+                "ZERO B",
+                Point::new(240, 222),
+                btn_text_style,
+                Alignment::Center,
+            )
+            .draw(target)?;
+        }
 
         Ok(())
     }
