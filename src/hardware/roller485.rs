@@ -590,7 +590,7 @@ where
     /// * `speed_filter` - Optional filter for smoothing speed readings
     pub async fn run_background_task(
         self,
-        name: &'static str,
+        _name: &'static str,
         mut speed_filter: Option<crate::filters::MotorValueFilter>,
     ) where
         I2C: 'static,

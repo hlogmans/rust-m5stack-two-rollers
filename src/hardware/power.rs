@@ -69,7 +69,7 @@ pub fn init_power_and_display_control<'a>(i2c_bus: I2c<'a, esp_hal::Blocking>) -
     }
     
     // Release the bus from AW9523 so it can be reused elsewhere
-    let i2c_bus = aw.release_i2c().release_i2c();
+    let i2c_bus = aw.into_i2c().release_i2c();
     
     info!("Power and display control initialization complete");
     i2c_bus

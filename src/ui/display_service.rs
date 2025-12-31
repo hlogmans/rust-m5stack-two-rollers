@@ -10,11 +10,11 @@ use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::watch::Watch;
 use embassy_futures::select;
 
-use crate::display::Display;
 use crate::business::input;
 use crate::ui::screen::Screen;
 use crate::ui::{ScreenController, ScreenEvent};
 use crate::ui::views::{SplashView, DashboardView};
+use crate::hardware::display::Display;
 use crate::hardware::CoreS3Display;
 use crate::info;
 

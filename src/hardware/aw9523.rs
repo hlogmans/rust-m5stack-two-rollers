@@ -131,7 +131,7 @@ where
     }
 
     /// Release the I2C interface from this AW9523 instance
-    pub fn release_i2c(self) -> I {
+    pub fn into_i2c(self) -> I {
         self.interface
     }
 }

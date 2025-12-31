@@ -12,6 +12,7 @@ use esp_backtrace as _;
 use m5_minimal::hardware::Board;
 use m5_minimal::hardware::TouchPoint;
 use m5_minimal::helpers::TelemetrySender;
+use m5_minimal::helpers::{print_memory_diagnostics, print_memory_stats};
 use m5_minimal::{info, warn}; // provides panic handler with backtrace via esp-println
 
 use alloc::boxed::Box;
@@ -73,6 +74,9 @@ async fn main(spawner: Spawner) -> ! {
     esp_rtos::start(timg0.timer0);
 
     info!("Embassy initialized!");
+    
+    // Print initial memory statistics
+    print_memory_diagnostics();
 
     // Initialize all hardware (power, display, and two Roller485 motors on separate I2C buses)
     let display_buffer: &'static mut [u8; 512] = Box::leak(Box::new([0_u8; 512]));
@@ -174,9 +178,17 @@ async fn main(spawner: Spawner) -> ! {
 
     info!("Motor A (0x65) and Motor B (0x64) on shared I2C1 Port B, Touch on I2C0");
 
-    // Idle loop
+    // Idle loop with periodic memory monitoring
+    let mut counter = 0;
     loop {
         Timer::after(Duration::from_secs(1)).await;
+        
+        // Print memory stats every 10 seconds
+        counter += 1;
+        if counter >= 10 {
+            print_memory_stats();
+            counter = 0;
+        }
     }
 }
 

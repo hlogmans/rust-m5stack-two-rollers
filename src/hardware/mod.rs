@@ -8,11 +8,12 @@ pub mod power;
 pub mod roller485;
 pub mod touch;
 pub mod aw9523;
+pub mod display;
 
 use alloc::boxed::Box;
 use core::cell::RefCell;
 
-use crate::display::{self, Display};
+use self::display::Display;
 use crate::helpers::TelemetrySender;
 use crate::{info, warn};
 use critical_section::Mutex;
