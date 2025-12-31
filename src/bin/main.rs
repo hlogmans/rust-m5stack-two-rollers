@@ -8,11 +8,11 @@
 #![deny(clippy::large_stack_frames)]
 
 use defmt_rtt as _;
-use m5_minimal::{info, warn};
+use esp_backtrace as _;
 use m5_minimal::hardware::Board;
 use m5_minimal::hardware::TouchPoint;
 use m5_minimal::helpers::TelemetrySender;
-use esp_backtrace as _; // provides panic handler with backtrace via esp-println
+use m5_minimal::{info, warn}; // provides panic handler with backtrace via esp-println
 
 use alloc::boxed::Box;
 use embassy_executor::Spawner;
@@ -22,15 +22,15 @@ use embassy_sync::watch::Watch;
 use embassy_time::{Duration, Timer};
 use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
-use m5_minimal::ui::DisplayService;
 use m5_minimal::business::input;
 use m5_minimal::filters::MotorValueFilter;
-
+use m5_minimal::ui::DisplayService;
 
 // Global channels for Motor A telemetry and commands
 static ANGLE_A_CH: Watch<CriticalSectionRawMutex, u16, 8> = Watch::new();
 static SPEED_A_CH: Watch<CriticalSectionRawMutex, f32, 4> = Watch::new();
-static MOTOR_A_CMD: Channel<CriticalSectionRawMutex, m5_minimal::hardware::MotorCommand, 4> = Channel::new();
+static MOTOR_A_CMD: Channel<CriticalSectionRawMutex, m5_minimal::hardware::MotorCommand, 4> =
+    Channel::new();
 
 // Business logic: reset triggers per motor
 static MOTOR_A_RESET: Channel<CriticalSectionRawMutex, (), 1> = Channel::new();
@@ -39,7 +39,8 @@ static MOTOR_B_RESET: Channel<CriticalSectionRawMutex, (), 1> = Channel::new();
 // Display gets angle updates for both motors
 static ANGLE_B_CH: Watch<CriticalSectionRawMutex, u16, 8> = Watch::new();
 static SPEED_B_CH: Watch<CriticalSectionRawMutex, f32, 4> = Watch::new();
-static MOTOR_B_CMD: Channel<CriticalSectionRawMutex, m5_minimal::hardware::MotorCommand, 4> = Channel::new();
+static MOTOR_B_CMD: Channel<CriticalSectionRawMutex, m5_minimal::hardware::MotorCommand, 4> =
+    Channel::new();
 
 // Touch events
 static TOUCH_CH: Watch<CriticalSectionRawMutex, TouchPoint, 4> = Watch::new();
@@ -87,12 +88,12 @@ async fn main(spawner: Spawner) -> ! {
         peripherals.GPIO15,
         display_buffer,
         peripherals.I2C1,
-        peripherals.GPIO9, // Port B SDA
-        peripherals.GPIO8, // Port B SCL
-        Some(TelemetrySender::from_watch(&ANGLE_A_CH)),   // Angle via Watch (display needs latest)
-        Some(TelemetrySender::from_watch(&SPEED_A_CH)),   // Speed via Watch (reset handler needs latest)
-        Some(TelemetrySender::from_watch(&ANGLE_B_CH)),   // Motor B angle for display
-        Some(TelemetrySender::from_watch(&SPEED_B_CH)),   // Motor B speed for diagnostics
+        peripherals.GPIO9,                              // Port B SDA
+        peripherals.GPIO8,                              // Port B SCL
+        Some(TelemetrySender::from_watch(&ANGLE_A_CH)), // Angle via Watch (display needs latest)
+        Some(TelemetrySender::from_watch(&SPEED_A_CH)), // Speed via Watch (reset handler needs latest)
+        Some(TelemetrySender::from_watch(&ANGLE_B_CH)), // Motor B angle for display
+        Some(TelemetrySender::from_watch(&SPEED_B_CH)), // Motor B speed for diagnostics
         &MOTOR_A_CMD,
         &MOTOR_B_CMD,
     )
@@ -130,7 +131,7 @@ async fn main(spawner: Spawner) -> ! {
     if let Err(e) = spawner.spawn(run_motor_background("B", motor_b.clone(), speed_filter_b)) {
         warn!("Spawn motor B failed: {:?}", e);
     }
-    
+
     // Spawn motor reset handlers (business logic)
     if let Err(e) = spawner.spawn(run_motor_reset_handler(
         "A",
@@ -142,27 +143,27 @@ async fn main(spawner: Spawner) -> ! {
         warn!("Spawn motor A reset handler failed: {:?}", e);
     }
 
-    if let Err(e) = spawner.spawn(run_motor_reset_handler(
+    if let Err(e) = spawner.spawn(run_motor_test(
         "B",
         motor_b,
-        &ANGLE_B_CH,
-        &SPEED_B_CH,
+        // &ANGLE_B_CH,
+        // &SPEED_B_CH,
         &MOTOR_B_RESET,
     )) {
         warn!("Spawn motor B reset handler failed: {:?}", e);
     }
-    
+
     // Wrap touch in SharedFT6336 with telemetry sender via Watch
     let shared_touch = m5_minimal::hardware::SharedFT6336::new(
         touch,
         Some(TelemetrySender::from_watch(&TOUCH_CH)),
     );
-    
+
     // Spawn touch reader background task
     if let Err(e) = spawner.spawn(run_touch_reader(shared_touch)) {
         warn!("Spawn touch reader failed: {:?}", e);
     }
-    
+
     // Spawn button router and action handler (business logic)
     if let Err(e) = spawner.spawn(input::run_button_router(&TOUCH_CH)) {
         warn!("Spawn button router failed: {:?}", e);
@@ -187,7 +188,30 @@ async fn run_motor_background(
     speed_filter: Option<MotorValueFilter>,
 ) {
     info!("Motor {} background task starting", name);
-    motor.run_background_task(speed_filter).await;
+    motor.run_background_task(name, speed_filter).await;
+}
+
+/// Task: run the motor for three seconds - generic for A/B
+#[embassy_executor::task(pool_size = 2)]
+async fn run_motor_test(
+    name: &'static str,
+    motor: m5_minimal::hardware::SharedRoller485<m5_minimal::hardware::RollerI2cDevice>,
+    reset_ch: &'static Channel<CriticalSectionRawMutex, (), 1>,
+) {
+    loop {
+        reset_ch.receive().await;
+        info!("Motor {} test task starting", name);
+        motor
+            .send_command(m5_minimal::hardware::MotorCommand::SetSpeed(60000))
+            .await;
+        Timer::after(Duration::from_secs(3)).await;
+        motor
+            .send_command(m5_minimal::hardware::MotorCommand::SetSpeed(0))
+            .await;
+        motor.send_command(m5_minimal::hardware::MotorCommand::SetReading)
+            .await;
+        info!("Motor {} test task complete", name);
+    }
 }
 
 /// Task: handle motor reset to zero (business logic) - generic for A/B
@@ -246,29 +270,31 @@ async fn run_display_service(
     angle_a_watch: &'static Watch<CriticalSectionRawMutex, u16, 8>,
     angle_b_watch: &'static Watch<CriticalSectionRawMutex, u16, 8>,
 ) {
-    service.run(screen_watch, countdown_watch, angle_a_watch, angle_b_watch).await;
+    service
+        .run(screen_watch, countdown_watch, angle_a_watch, angle_b_watch)
+        .await;
 }
 
 /// Task: Manage screen navigation (splash -> dashboard)
 #[embassy_executor::task]
 async fn run_navigation() {
     use m5_minimal::ui::Screen;
-    
+
     info!("Navigation task: starting splash screen");
-    
+
     // Initialize with Splash screen
     SCREEN_CH.sender().send(Screen::Splash);
-    
+
     // Countdown from 4 to 1 seconds
     for countdown in (1..=4).rev() {
         COUNTDOWN_CH.sender().send(countdown);
         Timer::after(Duration::from_secs(1)).await;
     }
-    
+
     // Switch to Dashboard
     info!("Navigation: switching to dashboard");
     SCREEN_CH.sender().send(Screen::Dashboard);
-    
+
     // Navigation task complete - screen stays on dashboard
     loop {
         Timer::after(Duration::from_secs(3600)).await;

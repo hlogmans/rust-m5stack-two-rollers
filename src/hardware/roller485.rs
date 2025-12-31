@@ -9,8 +9,10 @@
 //! Register Map:
 //! - 0x00-0x03: Motor position (32-bit signed integer, little-endian)
 //! - 0x10: Motor mode
-//! - 0x20-0x21: Motor speed (16-bit)
-//! - More registers available - see M5Stack Roller485 documentation
+//! - 0x40-0x43: Motor speed target (32-bit little-endian RPM)
+//! - 0x60-0x63: Motor speed readback (32-bit little-endian RPM)
+//! - 0x80-0x83: Motor position target (32-bit little-endian, scaled by 100)
+//! - 0x90-0x93: Motor position readback (32-bit little-endian, scaled by 100)
 
 use embedded_hal::i2c::I2c;
 use embassy_time::{Duration, Timer};
@@ -294,15 +296,19 @@ where
 
     /// Set the motor speed (RPM).
     /// The motor will accelerate/decelerate to this speed.
+    /// Automatically switches to Speed Control mode when needed.
     ///
     /// # Arguments
     /// * `speed_rpm` - Target speed in RPM (positive = forward, negative = reverse)
     pub fn set_speed(&mut self, speed_rpm: i32) -> Result<(), I2C::Error> {
-        // Device wants speed / 100, so multiply by 100
-        let speed_value = speed_rpm * 100;
-        
+        // Switch to Speed Control mode if not already there
+        let current_mode = self.read_mode()?;
+        if current_mode != Roller485Mode::Speed {
+            self.set_mode(Roller485Mode::Speed)?;
+        }
+
         // Convert to little-endian bytes (4-byte i32)
-        let bytes = speed_value.to_le_bytes();
+        let bytes = speed_rpm.to_le_bytes();
         
         // Write to speed control register
         self.i2c.write(self.address, &[
@@ -327,11 +333,11 @@ where
 
     /// Read current motor speed (RPM).
     ///
-    /// Reads the 4-byte speed readback register at 0x60, converts the
-    /// little-endian signed value to RPM with /100 scaling (per spec).
+    /// Reads the 4-byte speed readback register at 0x60 and converts the
+    /// little-endian signed value to RPM.
     pub fn read_speed_rpm(&mut self) -> Result<f32, I2C::Error> {
         let raw = self.read_speed_raw()?;
-        Ok(raw as f32 / 100.0)
+        Ok(raw as f32)
     }
 
     /// Read the raw speed register (scaled by 100).
@@ -409,6 +415,49 @@ fn parse_position_to_angle(position: i32) -> AngleBlock {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use embedded_hal::i2c::{ErrorType, I2c, Operation};
+
+    #[derive(Default)]
+    struct MockI2c {
+        last_addr: Option<u8>,
+        last_buf: [u8; 8],
+        last_len: usize,
+    }
+
+    impl ErrorType for MockI2c {
+        type Error = ();
+    }
+
+    impl I2c for MockI2c {
+        fn write(&mut self, address: u8, bytes: &[u8]) -> Result<(), Self::Error> {
+            self.last_addr = Some(address);
+            self.last_len = bytes.len().min(self.last_buf.len());
+            self.last_buf[..self.last_len].copy_from_slice(&bytes[..self.last_len]);
+            Ok(())
+        }
+
+        fn read(&mut self, _address: u8, buffer: &mut [u8]) -> Result<(), Self::Error> {
+            for b in buffer.iter_mut() {
+                *b = 0;
+            }
+            Ok(())
+        }
+
+        fn write_read(&mut self, address: u8, bytes: &[u8], buffer: &mut [u8]) -> Result<(), Self::Error> {
+            self.write(address, bytes)?;
+            self.read(address, buffer)
+        }
+
+        fn transaction(&mut self, address: u8, operations: &mut [Operation<'_>]) -> Result<(), Self::Error> {
+            for op in operations {
+                match op {
+                    Operation::Write(buf) => self.write(address, buf)?,
+                    Operation::Read(buf) => self.read(address, buf)?,
+                }
+            }
+            Ok(())
+        }
+    }
 
     #[test]
     fn test_angle_conversion() {
@@ -422,12 +471,12 @@ mod tests {
 
     #[test]
     fn test_speed_readback_conversion() {
-        // 123.45 RPM encoded as (12345) in little-endian i32
-        let bytes = 12345i32.to_le_bytes();
+        // 123 RPM encoded as little-endian i32
+        let bytes = 123i32.to_le_bytes();
         let value = i32::from_le_bytes(bytes);
-        assert_eq!(value, 12345);
-        let rpm = value as f32 / 100.0;
-        assert!((rpm - 123.45).abs() < 0.01);
+        assert_eq!(value, 123);
+        let rpm = value as f32;
+        assert!((rpm - 123.0).abs() < 0.01);
     }
 
     #[test]
@@ -454,6 +503,20 @@ mod tests {
         assert_eq!(angle_block.angle_deg, 0);
         assert_eq!(angle_block.steps, 0);
     }
+
+    #[test]
+    fn test_set_speed_writes_register_and_bytes() {
+        let mock = MockI2c::default();
+        let mut roller = Roller485::new(mock);
+
+        roller.set_speed(150).unwrap();
+
+        let mock = roller.into_i2c();
+        assert_eq!(mock.last_addr, Some(ROLLER485_DEFAULT_ADDR));
+        assert_eq!(mock.last_len, 5);
+        assert_eq!(mock.last_buf[0], registers::SPEED_CONTROL_REG);
+        assert_eq!(&mock.last_buf[1..5], &150i32.to_le_bytes());
+    }
 }
 
 /// Commands that can be sent to a motor controller
@@ -461,7 +524,7 @@ mod tests {
 pub enum MotorCommand {
     /// Move to absolute position (in steps)
     SetPosition(i32),
-    /// Set speed (in RPM)
+    /// Set speed (in steps of 0.01 RPM)
     SetSpeed(i32),
     /// Active Reading
     SetReading
@@ -527,6 +590,7 @@ where
     /// * `speed_filter` - Optional filter for smoothing speed readings
     pub async fn run_background_task(
         self,
+        name: &'static str,
         mut speed_filter: Option<crate::filters::MotorValueFilter>,
     ) where
         I2C: 'static,
@@ -585,7 +649,7 @@ where
                         };
                         
                         if let Some(rpm) = filtered_rpm {
-                            info!("Motor speed: {} RPM", rpm);
+                            //info!("Motor speed {}: {} RPM", name, rpm);
                             sender.send(rpm);
                         }
                     }
