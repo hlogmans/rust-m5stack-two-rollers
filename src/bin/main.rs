@@ -14,6 +14,7 @@ use m5_minimal::hardware::TouchPoint;
 use m5_minimal::helpers::TelemetrySender;
 use m5_minimal::helpers::{print_memory_diagnostics, print_memory_stats};
 use m5_minimal::{info, warn}; // provides panic handler with backtrace via esp-println
+use m5_minimal::business;
 
 use alloc::boxed::Box;
 use embassy_executor::Spawner;
@@ -24,7 +25,6 @@ use embassy_time::{Duration, Timer};
 use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
 use m5_minimal::business::input;
-use m5_minimal::filters::MotorValueFilter;
 use m5_minimal::ui::DisplayService;
 
 // Global channels for Motor A telemetry and commands
@@ -75,7 +75,7 @@ async fn main(spawner: Spawner) -> ! {
     esp_rtos::start(timg0.timer0);
 
     info!("Embassy initialized!");
-    
+
     // Print initial memory statistics
     print_memory_diagnostics();
 
@@ -110,41 +110,23 @@ async fn main(spawner: Spawner) -> ! {
         warn!("Spawn navigation failed: {:?}", e);
     }
 
-    // Extract motors and touch
-    let motor_a = board.roller_a;
-    let motor_b = board.roller_b;
+    // Extract touch (motors are now driven via command channels in business layer)
     let touch = board.touch;
 
-    // Spawn motor background task with speed filtering
-    let speed_filter_a = Some(MotorValueFilter::new(0.75, 0.3, 0.05));
-    if let Err(e) = spawner.spawn(run_motor_background("A", motor_a.clone(), speed_filter_a)) {
-        warn!("Spawn motor A failed: {:?}", e);
-    }
-
-    let speed_filter_b = Some(MotorValueFilter::new(0.75, 0.3, 0.05));
-    if let Err(e) = spawner.spawn(run_motor_background("B", motor_b.clone(), speed_filter_b)) {
-        warn!("Spawn motor B failed: {:?}", e);
+    // Business-owned tasks (motor command processors + motor test)
+    if let Err(e) = business::init(&spawner, &MOTOR_A_CMD, &MOTOR_B_CMD, &MOTOR_B_RESET) {
+        warn!("Business init failed: {:?}", e);
     }
 
     // Spawn motor reset handlers (business logic)
-    if let Err(e) = spawner.spawn(run_motor_reset_handler(
+    if let Err(e) = spawner.spawn(business::run_motor_reset_handler(
         "A",
-        motor_a,
+        &MOTOR_A_CMD,
         &ANGLE_A_CH,
         &SPEED_A_CH,
         &MOTOR_A_RESET,
     )) {
         warn!("Spawn motor A reset handler failed: {:?}", e);
-    }
-
-    if let Err(e) = spawner.spawn(run_motor_test(
-        "B",
-        motor_b,
-        // &ANGLE_B_CH,
-        // &SPEED_B_CH,
-        &MOTOR_B_RESET,
-    )) {
-        warn!("Spawn motor B reset handler failed: {:?}", e);
     }
 
     // Wrap touch in SharedFT6336 with telemetry sender via Watch
@@ -179,93 +161,6 @@ async fn main(spawner: Spawner) -> ! {
             print_memory_stats();
             counter = 0;
         }
-    }
-}
-
-/// Task: run the motor background polling and command processing
-#[embassy_executor::task(pool_size = 2)]
-async fn run_motor_background(
-    name: &'static str,
-    motor: m5_minimal::hardware::SharedRoller485<m5_minimal::hardware::RollerI2cDevice>,
-    speed_filter: Option<MotorValueFilter>,
-) {
-    info!("Motor {} background task starting", name);
-    motor.run_background_task(name, speed_filter).await;
-}
-
-/// Task: run the motor for three seconds - generic for A/B
-#[embassy_executor::task(pool_size = 2)]
-async fn run_motor_test(
-    name: &'static str,
-    motor: m5_minimal::hardware::SharedRoller485<m5_minimal::hardware::RollerI2cDevice>,
-    reset_ch: &'static Channel<CriticalSectionRawMutex, (), 1>,
-) {
-    loop {
-        reset_ch.receive().await;
-        info!("Motor {} test task starting", name);
-        let mut speed = 10000i32;
-
-        for _ in 0..10 {
-            motor
-                .send_command(m5_minimal::hardware::MotorCommand::SetSpeed(speed))
-                .await;
-            speed *= -2; 
-            Timer::after(Duration::from_millis(500)).await;
-        }   
-
-        motor
-            .send_command(m5_minimal::hardware::MotorCommand::SetSpeed(0))
-            .await;
-        motor.send_command(m5_minimal::hardware::MotorCommand::SetReading)
-            .await;
-        info!("Motor {} test task complete", name);
-    }
-}
-
-/// Task: handle motor reset to zero (business logic) - generic for A/B
-#[embassy_executor::task(pool_size = 2)]
-async fn run_motor_reset_handler(
-    name: &'static str,
-    motor: m5_minimal::hardware::SharedRoller485<m5_minimal::hardware::RollerI2cDevice>,
-    angle_watch: &'static Watch<CriticalSectionRawMutex, u16, 8>,
-    speed_watch: &'static Watch<CriticalSectionRawMutex, f32, 4>,
-    reset_ch: &'static Channel<CriticalSectionRawMutex, (), 1>,
-) {
-    info!("Motor {} reset handler starting", name);
-
-    let mut angle_receiver = angle_watch
-        .receiver()
-        .expect("Need angle receiver for reset handler");
-    let mut speed_receiver = speed_watch
-        .receiver()
-        .expect("Need speed receiver for reset handler");
-
-    loop {
-        reset_ch.receive().await;
-
-        info!("Reset {} to zero requested", name);
-
-        if angle_receiver.get().await == 0 {
-            info!("{} already at zero", name);
-            continue;
-        }
-
-        motor
-            .send_command(m5_minimal::hardware::MotorCommand::SetPosition(0))
-            .await;
-
-        info!("Waiting {} movement start...", name);
-        let _ = speed_receiver.changed_and(|v| v.abs() > 0.2f32).await;
-
-        info!("Waiting {} movement stop...", name);
-        let _ = speed_receiver.changed_and(|v| *v == 0.0f32).await;
-
-        Timer::after(Duration::from_millis(100)).await;
-        motor
-            .send_command(m5_minimal::hardware::MotorCommand::SetReading)
-            .await;
-
-        info!("Reset {} complete", name);
     }
 }
 
