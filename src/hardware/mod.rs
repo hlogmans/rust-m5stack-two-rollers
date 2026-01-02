@@ -46,6 +46,63 @@ type ManagedI2cBus = Mutex<RefCell<I2c<'static, esp_hal::Blocking>>>;
 type ManagedI2cDevice = CriticalSectionDevice<'static, I2c<'static, esp_hal::Blocking>>;
 pub type RollerI2cDevice = ManagedI2cDevice;
 
+/// Collected peripherals and pins required to build the Board
+/// (TIMG0 is intentionally split so main can start it first).
+pub struct BoardPeripherals<'a> {
+    pub i2c0: esp_hal::peripherals::I2C0<'a>,
+    pub i2c0_sda: esp_hal::peripherals::GPIO12<'a>,
+    pub i2c0_scl: esp_hal::peripherals::GPIO11<'a>,
+    pub spi2: esp_hal::peripherals::SPI2<'a>,
+    pub gpio_mosi: esp_hal::peripherals::GPIO37<'a>,
+    pub gpio_sck: esp_hal::peripherals::GPIO36<'a>,
+    pub gpio_cs: esp_hal::peripherals::GPIO3<'a>,
+    pub gpio_dc: esp_hal::peripherals::GPIO35<'a>,
+    pub gpio_rst: esp_hal::peripherals::GPIO15<'a>,
+    pub i2c1: esp_hal::peripherals::I2C1<'a>,
+    pub i2c1_sda: esp_hal::peripherals::GPIO9<'a>,
+    pub i2c1_scl: esp_hal::peripherals::GPIO8<'a>,
+}
+
+/// Split `Peripherals` so main can start the timer first without touching pins/I2C elsewhere.
+pub fn split_peripherals<'a>(
+    peripherals: esp_hal::peripherals::Peripherals,
+) -> (esp_hal::peripherals::TIMG0<'a>, BoardPeripherals<'a>) {
+    let esp_hal::peripherals::Peripherals {
+        TIMG0: timg0,
+        I2C0: i2c0,
+        GPIO12: i2c0_sda,
+        GPIO11: i2c0_scl,
+        SPI2: spi2,
+        GPIO37: gpio_mosi,
+        GPIO36: gpio_sck,
+        GPIO3: gpio_cs,
+        GPIO35: gpio_dc,
+        GPIO15: gpio_rst,
+        I2C1: i2c1,
+        GPIO9: i2c1_sda,
+        GPIO8: i2c1_scl,
+        ..
+    } = peripherals;
+
+    (
+        timg0,
+        BoardPeripherals {
+            i2c0,
+            i2c0_sda,
+            i2c0_scl,
+            spi2,
+            gpio_mosi,
+            gpio_sck,
+            gpio_cs,
+            gpio_dc,
+            gpio_rst,
+            i2c1,
+            i2c1_sda,
+            i2c1_scl,
+        },
+    )
+}
+
 /// Represents the initialized M5Stack CoreS3 hardware
 pub struct Board<'a> {
     pub display: Display<CoreS3Display<'a>>,
@@ -71,19 +128,8 @@ where
     /// For other peripherals (like TIMG0), keep references before calling init.
     /// 
     /// # Arguments
-    /// * `i2c0` - I2C0 peripheral (for AXP2101, then Motor A)
-    /// * `sda` - GPIO12 for I2C SDA
-    /// * `scl` - GPIO11 for I2C SCL
-    /// * `spi2` - SPI2 peripheral
-    /// * `gpio_mosi` - GPIO37 for SPI MOSI
-    /// * `gpio_sck` - GPIO36 for SPI SCK
-    /// * `gpio_cs` - GPIO3 for SPI CS
-    /// * `gpio_dc` - GPIO35 for display DC
-    /// * `gpio_rst` - GPIO15 for display RST
+    /// * `peripherals` - bundled board peripherals (pins and buses are wired internally)
     /// * `display_buffer` - Buffer for display SPI transfers (min 512 bytes)
-    /// * `i2c1` - I2C1 peripheral (Port B) on GPIO9 (SDA) / GPIO8 (SCL)
-    /// * `i2c1_sda` - Port B SDA pin
-    /// * `i2c1_scl` - Port B SCL pin
     /// * `angle_sender_a` - Optional channel-agnostic sender for motor A (0x65) angle updates
     /// * `speed_sender_a` - Optional channel-agnostic sender for motor A speed updates
     /// * `angle_sender_b` - Optional channel-agnostic sender for motor B (0x64) angle updates
@@ -98,19 +144,8 @@ where
     /// # Returns
     /// A `Board` struct containing all initialized hardware
     pub async fn init(
-        i2c0: esp_hal::peripherals::I2C0<'a>,
-        sda: esp_hal::peripherals::GPIO12<'a>,
-        scl: esp_hal::peripherals::GPIO11<'a>,
-        spi2: esp_hal::peripherals::SPI2<'a>,
-        gpio_mosi: esp_hal::peripherals::GPIO37<'a>,
-        gpio_sck: esp_hal::peripherals::GPIO36<'a>,
-        gpio_cs: esp_hal::peripherals::GPIO3<'a>,
-        gpio_dc: esp_hal::peripherals::GPIO35<'a>,
-        gpio_rst: esp_hal::peripherals::GPIO15<'a>,
+        peripherals: BoardPeripherals<'a>,
         display_buffer: &'a mut [u8; 512],
-        i2c1: esp_hal::peripherals::I2C1<'a>,
-        i2c1_sda: impl esp_hal::gpio::interconnect::PeripheralOutput<'a>,
-        i2c1_scl: impl esp_hal::gpio::interconnect::PeripheralOutput<'a>,
         angle_sender_a: Option<TelemetrySender<u16, 8>>,
         speed_sender_a: Option<TelemetrySender<f32, 4>>,
         angle_sender_b: Option<TelemetrySender<u16, 8>>,
@@ -120,14 +155,30 @@ where
     ) -> Self {
         info!("Initializing M5Stack CoreS3 hardware...");
 
+        // Destructure bundled peripherals so main stays pin-free.
+        let BoardPeripherals {
+            i2c0,
+            i2c0_sda,
+            i2c0_scl,
+            spi2,
+            gpio_mosi,
+            gpio_sck,
+            gpio_cs,
+            gpio_dc,
+            gpio_rst,
+            i2c1,
+            i2c1_sda,
+            i2c1_scl,
+        } = peripherals;
+
         // Create I2C0 bus on GPIO12/11 for AXP2101 and AW9523
         let i2c0_bus = I2c::new(
             i2c0,
             I2cConfig::default().with_frequency(Rate::from_khz(400)),
         )
         .expect("Failed to create I2C0")
-        .with_sda(sda)
-        .with_scl(scl);
+        .with_sda(i2c0_sda)
+        .with_scl(i2c0_scl);
 
         // Initialize power management (AXP2101) and display control (AW9523).
         // This returns the bus back after configuration so we can optionally scan it.

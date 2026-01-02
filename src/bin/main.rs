@@ -70,7 +70,8 @@ async fn main(spawner: Spawner) -> ! {
     esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 73744);
 
     // Start embassy executor timer FIRST - needed for any async operations
-    let timg0 = TimerGroup::new(peripherals.TIMG0);
+    let (timg0, peripherals) = m5_minimal::hardware::split_peripherals(peripherals);
+    let timg0 = TimerGroup::new(timg0);
     esp_rtos::start(timg0.timer0);
 
     info!("Embassy initialized!");
@@ -81,19 +82,8 @@ async fn main(spawner: Spawner) -> ! {
     // Initialize all hardware (power, display, and two Roller485 motors on separate I2C buses)
     let display_buffer: &'static mut [u8; 512] = Box::leak(Box::new([0_u8; 512]));
     let board = Board::init(
-        peripherals.I2C0,
-        peripherals.GPIO12,
-        peripherals.GPIO11,
-        peripherals.SPI2,
-        peripherals.GPIO37,
-        peripherals.GPIO36,
-        peripherals.GPIO3,
-        peripherals.GPIO35,
-        peripherals.GPIO15,
+        peripherals,
         display_buffer,
-        peripherals.I2C1,
-        peripherals.GPIO9,                              // Port B SDA
-        peripherals.GPIO8,                              // Port B SCL
         Some(TelemetrySender::from_watch(&ANGLE_A_CH)), // Angle via Watch (display needs latest)
         Some(TelemetrySender::from_watch(&SPEED_A_CH)), // Speed via Watch (reset handler needs latest)
         Some(TelemetrySender::from_watch(&ANGLE_B_CH)), // Motor B angle for display
@@ -213,10 +203,16 @@ async fn run_motor_test(
     loop {
         reset_ch.receive().await;
         info!("Motor {} test task starting", name);
-        motor
-            .send_command(m5_minimal::hardware::MotorCommand::SetSpeed(60000))
-            .await;
-        Timer::after(Duration::from_secs(3)).await;
+        let mut speed = 10000i32;
+
+        for _ in 0..10 {
+            motor
+                .send_command(m5_minimal::hardware::MotorCommand::SetSpeed(speed))
+                .await;
+            speed *= -2; 
+            Timer::after(Duration::from_millis(500)).await;
+        }   
+
         motor
             .send_command(m5_minimal::hardware::MotorCommand::SetSpeed(0))
             .await;
