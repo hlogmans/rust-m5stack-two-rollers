@@ -93,6 +93,10 @@ async fn main(spawner: Spawner) -> ! {
     )
     .await;
 
+    // Clone motors BEFORE display moves into DisplayService
+    let motor_a = Box::leak(Box::new(board.roller_a.clone()));
+    let motor_b = Box::leak(Box::new(board.roller_b.clone()));
+
     // Spawn DisplayService to manage screens and rendering
     let display_service = DisplayService::new(board.display);
     if let Err(e) = spawner.spawn(run_display_service(
@@ -110,8 +114,15 @@ async fn main(spawner: Spawner) -> ! {
         warn!("Spawn navigation failed: {:?}", e);
     }
 
-    // Extract touch (motors are now driven via command channels in business layer)
-    let touch = board.touch;
+    // Spawn motor A background task (listens to commands, polls encoder, reports telemetry)
+    if let Err(e) = spawner.spawn(run_motor_a_background(motor_a.clone())) {
+        warn!("Spawn motor A background task failed: {:?}", e);
+    }
+
+    // Spawn motor B background task (listens to commands, polls encoder, reports telemetry)
+    if let Err(e) = spawner.spawn(run_motor_b_background(motor_b.clone())) {
+        warn!("Spawn motor B background task failed: {:?}", e);
+    }
 
     // Business-owned tasks (motor command processors + motor test)
     if let Err(e) = business::init(&spawner, &MOTOR_A_CMD, &MOTOR_B_CMD, &MOTOR_B_RESET) {
@@ -128,6 +139,9 @@ async fn main(spawner: Spawner) -> ! {
     )) {
         warn!("Spawn motor A reset handler failed: {:?}", e);
     }
+
+    // Extract touch (motors are now driven via command channels in business layer)
+    let touch = board.touch;
 
     // Wrap touch in SharedFT6336 with telemetry sender via Watch
     let shared_touch = m5_minimal::hardware::SharedFT6336::new(
@@ -218,4 +232,23 @@ async fn run_touch_reader(
     shared_touch.run_background_task().await
 }
 
-// touch handler removed in favor of business::input routing
+/// Task: Motor A background processing (command handler + encoder polling)
+#[embassy_executor::task]
+async fn run_motor_a_background(
+    motor: m5_minimal::hardware::SharedRoller485<
+        m5_minimal::hardware::RollerI2cDevice,
+    >,
+) {
+    motor.run_background_task("A", None).await
+}
+
+/// Task: Motor B background processing (command handler + encoder polling)
+#[embassy_executor::task]
+async fn run_motor_b_background(
+    motor: m5_minimal::hardware::SharedRoller485<
+        m5_minimal::hardware::RollerI2cDevice,
+    >,
+) {
+    motor.run_background_task("B", None).await
+}
+

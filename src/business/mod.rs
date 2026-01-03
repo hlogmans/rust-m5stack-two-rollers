@@ -12,4 +12,4 @@ pub mod tasks;
 pub use angle_controller::AngleController;
 pub use evaluator::{EvaluationStatus, Evaluator, ThresholdEvaluator};
 pub use init::{init, InitError};
-pub use tasks::{run_motor_background, run_motor_reset_handler, run_motor_test};
+pub use tasks::{run_motor_reset_handler, run_motor_test};
