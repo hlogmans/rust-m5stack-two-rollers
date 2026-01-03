@@ -75,7 +75,7 @@ pub fn init_touch_reader(
     spawner: &Spawner,
     shared_touch: crate::hardware::SharedFT6336<
         esp_hal::i2c::master::I2c<'static, esp_hal::Blocking>,
-        4,
+        8,
     >,
 ) -> Result<(), InitError> {
     spawner
@@ -134,7 +134,7 @@ async fn run_navigation(
 async fn run_touch_reader(
     shared_touch: crate::hardware::SharedFT6336<
         esp_hal::i2c::master::I2c<'static, esp_hal::Blocking>,
-        4,
+        8,
     >,
 ) {
     use defmt::info;

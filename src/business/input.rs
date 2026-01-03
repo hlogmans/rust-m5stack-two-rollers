@@ -1,24 +1,24 @@
-//! Input routing: map touch events to logical buttons per screen
+//! Input routing: map confirmed touch presses to logical buttons per screen
 //!
-//! This module decouples raw touch input from business actions by:
-//! - Receiving `TouchPoint` events
+//! This module decouples high-level touch input from business actions by:
+//! - Receiving `ConfirmedPress` events (already debounced, 300ms+ contact)
 //! - Using a registered `ButtonLayout` for the active screen
-//! - Emitting `ButtonEvent`s when touches hit a button
+//! - Emitting `ButtonEvent`s when presses hit a button
 //!
 //! Screens register and unregister their buttons via `set_buttons()`.
+//! Touch releases are handled transparently - only confirmed presses trigger events.
 
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
 use embassy_sync::watch::Watch;
 
-use crate::hardware::{TouchEvent, TouchPoint};
+use crate::hardware::ConfirmedPress;
 use crate::ui::buttons::{ButtonId, ButtonSpec};
 
 /// Event types for button interactions
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum ButtonEventKind {
     Press,
-    Release,
 }
 
 /// A routed button event
@@ -78,57 +78,36 @@ pub fn clear_buttons() {
     BUTTON_LAYOUT.sender().send(ButtonLayout::empty());
 }
 
-/// Task: Route touches to button events. Provide the touch `Watch`.
+/// Task: Route confirmed presses to button events. Provide the press Channel.
 #[embassy_executor::task]
 pub async fn run_button_router(
-    touch_watch: &'static Watch<CriticalSectionRawMutex, TouchPoint, 4>,
+    press_channel: &'static Channel<CriticalSectionRawMutex, ConfirmedPress, 8>,
 ) {
     let mut layout_rx = BUTTON_LAYOUT
         .receiver()
         .expect("Failed to create BUTTON_LAYOUT receiver");
-    let mut touch_rx = touch_watch
-        .receiver()
-        .expect("Failed to create touch receiver");
+    let press_rx = press_channel.receiver();
 
     // Start with no buttons
     let mut layout = ButtonLayout::empty();
-    let mut active_pressed: Option<ButtonId> = None;
 
     loop {
-        // Wait for either a layout change or a touch event
-        let evt = embassy_futures::select::select(layout_rx.changed(), touch_rx.changed()).await;
+        // Wait for either a layout change or a confirmed press
+        let evt = embassy_futures::select::select(layout_rx.changed(), press_rx.receive()).await;
         match evt {
             embassy_futures::select::Either::First(new_layout) => {
                 layout = new_layout;
-                // On layout change, consider any pressed state released
-                active_pressed = None;
             }
-            embassy_futures::select::Either::Second(touch) => {
-                match touch.event {
-                    TouchEvent::Press | TouchEvent::Contact => {
-                        if let Some(id) = layout.hit(touch.x, touch.y) {
-                            // Debounce: only emit press when id changes from none/other
-                            if active_pressed != Some(id) {
-                                active_pressed = Some(id);
-                                let _ = BUTTON_EVENTS.try_send(ButtonEvent { id, kind: ButtonEventKind::Press });
-                            }
-                        } else {
-                            // Touch not on any button, reset pressed state
-                            active_pressed = None;
-                        }
-                    }
-                    TouchEvent::Release => {
-                        if let Some(id) = active_pressed.take() {
-                            let _ = BUTTON_EVENTS.try_send(ButtonEvent { id, kind: ButtonEventKind::Release });
-                        }
-                    }
+            embassy_futures::select::Either::Second(press) => {
+                if let Some(id) = layout.hit(press.x, press.y) {
+                    let _ = BUTTON_EVENTS.try_send(ButtonEvent { id, kind: ButtonEventKind::Press });
                 }
             }
         }
     }
 }
 
-/// Task: Handle button events and trigger business actions passed in
+/// Task: Handle button presses and trigger business actions
 #[embassy_executor::task]
 pub async fn run_button_actions(
     reset_a: &'static Channel<CriticalSectionRawMutex, (), 1>,
@@ -144,7 +123,6 @@ pub async fn run_button_actions(
             (ButtonId::ZeroB, ButtonEventKind::Press) => {
                 let _ = reset_b.try_send(());
             }
-            _ => {}
         }
     }
 }

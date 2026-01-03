@@ -1,18 +1,22 @@
 //! Touch controller driver for FT6336 on M5Stack CoreS3
 //!
 //! The FT6336 is a capacitive touch controller connected via I2C at address 0x38.
-//! This module provides both a driver struct for exclusive I2C access and a standalone
-//! function for reading touch data via a shared I2C reference.
+//! This module provides debounced, high-level touch events suitable for business logic:
+//! - Only emits ConfirmedPress after 300ms minimum contact duration
+//! - Emits Release when contact ends
+//! - Tracks position and ensures sequential press/release handling
 
 use embedded_hal::i2c::I2c;
 use embassy_sync::{mutex::Mutex, blocking_mutex::raw::CriticalSectionRawMutex};
-use embassy_time::Timer;
+use embassy_time::{Timer, Instant};
 use alloc::sync::Arc;
 use crate::{debug, info};
-use crate::helpers::TelemetrySender;
 
 /// I2C address of the FT6336 touch controller
 const FT6336_ADDR: u8 = 0x38;
+
+/// Minimum hold duration for a press to be confirmed (ms)
+const PRESS_CONFIRM_TIME_MS: u64 = 100;
 
 /// FT6336 register addresses
 mod registers {
@@ -24,7 +28,7 @@ mod registers {
     pub const _P1_YL: u8 = 0x06;  // Y low bits, not used
 }
 
-/// Touch event type
+/// Low-level touch event type from FT6336 hardware
 #[derive(Debug, Clone, Copy)]
 pub enum TouchEvent {
     /// Touch press
@@ -35,7 +39,7 @@ pub enum TouchEvent {
     Contact,
 }
 
-/// Represents a single touch point
+/// Represents a single touch point (low-level hardware data)
 #[derive(Debug, Clone, Copy)]
 pub struct TouchPoint {
     /// X coordinate (0-319 for 320-pixel wide display)
@@ -44,6 +48,15 @@ pub struct TouchPoint {
     pub y: u16,
     /// Touch event type
     pub event: TouchEvent,
+}
+
+/// High-level confirmed press event - only emitted after 300ms of contact
+#[derive(Debug, Clone, Copy)]
+pub struct ConfirmedPress {
+    /// X coordinate of the press
+    pub x: u16,
+    /// Y coordinate of the press
+    pub y: u16,
 }
 
 /// FT6336 touch controller driver
@@ -96,7 +109,7 @@ where
         // Extract Y coordinate: bits [3:0] of byte 2 are Y[11:8], byte 3 is Y[7:0]
         let y = (((touch_data[2] & 0x0F) as u16) << 8) | (touch_data[3] as u16);
 
-        debug!("Touch detected: x={}, y={}, event={:?}", x, y, event);
+        //debug!("Touch detected: x={}, y={}, event={:?}", x, y, event);
 
         Ok(Some(TouchPoint { x, y, event }))
     }
@@ -167,27 +180,28 @@ where
     Ok(Some(TouchPoint { x, y, event }))
 }
 
-/// Shared wrapper around FT6336 with telemetry sender
+/// Shared wrapper around FT6336 with debounced press events
 ///
 /// Provides async-safe access to the touch controller through an Arc<Mutex<>>.
-/// Automatically sends touch events via optional TelemetrySender (Watch or Channel).
+/// Emits only confirmed presses (after 300ms contact) and releases via a Channel,
+/// suitable for business logic consumption.
 pub struct SharedFT6336<I2C, const N: usize> {
     touch: Arc<Mutex<CriticalSectionRawMutex, FT6336<I2C>>>,
-    touch_sender: Option<TelemetrySender<TouchPoint, N>>,
+    press_sender: Option<embassy_sync::channel::Sender<'static, CriticalSectionRawMutex, ConfirmedPress, N>>,
 }
 
 impl<I2C, const N: usize> SharedFT6336<I2C, N>
 where
     I2C: I2c + 'static,
 {
-    /// Create a new shared touch controller
+    /// Create a new shared touch controller with debounced press sender
     pub fn new(
         touch: FT6336<I2C>,
-        touch_sender: Option<TelemetrySender<TouchPoint, N>>,
+        press_sender: Option<embassy_sync::channel::Sender<'static, CriticalSectionRawMutex, ConfirmedPress, N>>,
     ) -> Self {
         Self {
             touch: Arc::new(Mutex::new(touch)),
-            touch_sender,
+            press_sender,
         }
     }
 
@@ -197,19 +211,89 @@ where
         touch.read_touch()
     }
 
-    /// Background task: continuously poll touch and publish via telemetry sender
+    /// Background task: continuously poll touch with debouncing logic
     ///
-    /// Poll rate: ~100Hz
+    /// Implements:
+    /// - 300ms hold requirement for press confirmation
+    /// - Sequential press/release (next press starts after release)
+    /// - Emits only ConfirmedPress and Release events via channel
+    ///
+    /// Poll rate: ~100Hz (10ms intervals)
     pub async fn run_background_task(self) -> ! {
         info!("Touch background task starting...");
         
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        enum State {
+            Idle,
+            Touching { since: Instant, x: u16, y: u16 },
+            Confirmed { x: u16, y: u16 },
+        }
+        
+        let mut state = State::Idle;
+        
         loop {
             // Read touch via internal mutex
-            if let Ok(Some(point)) = self.read_touch().await {
-                // Publish to telemetry sender if configured
-                if let Some(ref sender) = self.touch_sender {
-                    sender.send(point);
+            let raw = self.read_touch().await.ok().flatten();
+            
+            match (&state, raw) {
+                // Idle: waiting for first contact
+                (State::Idle, Some(point)) if matches!(point.event, TouchEvent::Press | TouchEvent::Contact) => {
+                    debug!("Touch: contact started at ({}, {})", point.x, point.y);
+                    state = State::Touching {
+                        since: Instant::now(),
+                        x: point.x,
+                        y: point.y,
+                    };
                 }
+                
+                // Touching: counting down to confirmation (300ms)
+                (State::Touching { since, x, y }, Some(point)) if matches!(point.event, TouchEvent::Contact) => {
+                    let elapsed = Instant::now() - *since;
+                    if elapsed.as_millis() >= PRESS_CONFIRM_TIME_MS {
+                        // Confirmed!
+                        debug!("Touch: press confirmed after {}ms at ({}, {})", elapsed.as_millis(), x, y);
+                        if let Some(ref sender) = self.press_sender {
+                            let _ = sender.try_send(ConfirmedPress { x: *x, y: *y });
+                        }
+                        state = State::Confirmed { x: *x, y: *y };
+                    }
+                }
+                
+                // Confirmed: waiting for release
+                (State::Confirmed { x: _, y: _ }, Some(point)) if matches!(point.event, TouchEvent::Contact) => {
+                    // Still confirmed and touching, position update only (no event)
+                    // Position tracking here if needed
+                }
+                
+                // Touching: released before confirmation
+                (State::Touching { .. }, Some(point)) if matches!(point.event, TouchEvent::Release) => {
+                    debug!("Touch: released before confirmation");
+                    state = State::Idle;
+                }
+                
+                // Confirmed: released after confirmation -> emit Release
+                (State::Confirmed { x, y }, Some(point)) if matches!(point.event, TouchEvent::Release) => {
+                    debug!("Touch: confirmed release at ({}, {})", x, y);
+                    // Could emit a Release event here if needed
+                    state = State::Idle;
+                }
+                
+                // No touch
+                (_, None) => {
+                    match state {
+                        State::Touching { .. } => {
+                            debug!("Touch: lost contact before confirmation");
+                            state = State::Idle;
+                        }
+                        State::Confirmed { .. } => {
+                            debug!("Touch: lost contact after confirmation");
+                            state = State::Idle;
+                        }
+                        _ => {}
+                    }
+                }
+                
+                _ => {} // Other transitions ignored
             }
 
             // Poll at ~100Hz

@@ -24,7 +24,7 @@ use esp_hal::time::Rate;
 use embedded_hal_bus::i2c::CriticalSectionDevice;
 
 pub use roller485::{Roller485, SharedRoller485, MotorCommand};
-pub use touch::{FT6336, TouchEvent, TouchPoint, read_touch_data, SharedFT6336};
+pub use touch::{FT6336, TouchEvent, TouchPoint, ConfirmedPress, read_touch_data, SharedFT6336};
 
 /// Type alias for the display driver used on M5Stack CoreS3
 pub type CoreS3Display<'a> = mipidsi::Display<

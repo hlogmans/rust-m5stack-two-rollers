@@ -9,8 +9,7 @@
 
 use defmt_rtt as _;
 use esp_backtrace as _;
-use m5_minimal::hardware::Board;
-use m5_minimal::hardware::TouchPoint;
+use m5_minimal::hardware::{Board, ConfirmedPress};
 use m5_minimal::helpers::TelemetrySender;
 use m5_minimal::helpers::{print_memory_diagnostics, print_memory_stats};
 use m5_minimal::{info, warn}; // provides panic handler with backtrace via esp-println
@@ -43,8 +42,8 @@ static SPEED_B_CH: Watch<CriticalSectionRawMutex, f32, 4> = Watch::new();
 static MOTOR_B_CMD: Channel<CriticalSectionRawMutex, m5_minimal::hardware::MotorCommand, 4> =
     Channel::new();
 
-// Touch events
-static TOUCH_CH: Watch<CriticalSectionRawMutex, TouchPoint, 4> = Watch::new();
+// Touch events - now a Channel for confirmed presses only
+static TOUCH_CH: Channel<CriticalSectionRawMutex, ConfirmedPress, 8> = Channel::new();
 
 // Screen navigation
 static SCREEN_CH: Watch<CriticalSectionRawMutex, m5_minimal::ui::Screen, 4> = Watch::new();
@@ -117,10 +116,10 @@ async fn main(spawner: Spawner) -> ! {
         warn!("UI init_navigation failed: {:?}", e);
     }
 
-    // Wrap touch in SharedFT6336 with telemetry sender via Watch
+    // Wrap touch in SharedFT6336 with debounced press channel
     let shared_touch = m5_minimal::hardware::SharedFT6336::new(
         touch,
-        Some(TelemetrySender::from_watch(&TOUCH_CH)),
+        Some(TOUCH_CH.sender()),
     );
 
     if let Err(e) = ui::init_touch_reader(&spawner, shared_touch) {
