@@ -627,7 +627,7 @@ where
                     Ok(steps) => {
                         let angle = ((steps % 333 + 333) % 333) * 360 / 333;
                         if (!first_position_sent) || (angle != original_angle) {
-                            info!("Motor position: steps={}, angle={}°", steps, angle);
+                            //info!("Motor position: steps={}, angle={}°", steps, angle);
                             sender.send(angle as u16);
                             first_position_sent = true;
                             original_angle = angle;

@@ -15,6 +15,7 @@ use m5_minimal::helpers::TelemetrySender;
 use m5_minimal::helpers::{print_memory_diagnostics, print_memory_stats};
 use m5_minimal::{info, warn}; // provides panic handler with backtrace via esp-println
 use m5_minimal::business;
+use m5_minimal::ui;
 
 use alloc::boxed::Box;
 use embassy_executor::Spawner;
@@ -25,7 +26,6 @@ use embassy_time::{Duration, Timer};
 use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
 use m5_minimal::business::input;
-use m5_minimal::ui::DisplayService;
 
 // Global channels for Motor A telemetry and commands
 static ANGLE_A_CH: Watch<CriticalSectionRawMutex, u16, 8> = Watch::new();
@@ -97,51 +97,25 @@ async fn main(spawner: Spawner) -> ! {
     let motor_a = Box::leak(Box::new(board.roller_a.clone()));
     let motor_b = Box::leak(Box::new(board.roller_b.clone()));
 
-    // Spawn DisplayService to manage screens and rendering
-    let display_service = DisplayService::new(board.display);
-    if let Err(e) = spawner.spawn(run_display_service(
+    // Extract touch and display
+    let touch = board.touch;
+    let display_service = m5_minimal::ui::DisplayService::new(board.display);
+
+    // === UI Layer Initialization ===
+    if let Err(e) = ui::init_display_service(
+        &spawner,
         display_service,
         &SCREEN_CH,
         &COUNTDOWN_CH,
         &ANGLE_A_CH,
         &ANGLE_B_CH,
-    )) {
-        warn!("Spawn display service failed: {:?}", e);
+    ) {
+        warn!("UI init_display_service failed: {:?}", e);
     }
 
-    // Spawn navigation task to manage screen transitions
-    if let Err(e) = spawner.spawn(run_navigation()) {
-        warn!("Spawn navigation failed: {:?}", e);
+    if let Err(e) = ui::init_navigation(&spawner, &SCREEN_CH, &COUNTDOWN_CH) {
+        warn!("UI init_navigation failed: {:?}", e);
     }
-
-    // Spawn motor A background task (listens to commands, polls encoder, reports telemetry)
-    if let Err(e) = spawner.spawn(run_motor_a_background(motor_a.clone())) {
-        warn!("Spawn motor A background task failed: {:?}", e);
-    }
-
-    // Spawn motor B background task (listens to commands, polls encoder, reports telemetry)
-    if let Err(e) = spawner.spawn(run_motor_b_background(motor_b.clone())) {
-        warn!("Spawn motor B background task failed: {:?}", e);
-    }
-
-    // Business-owned tasks (motor command processors + motor test)
-    if let Err(e) = business::init(&spawner, &MOTOR_A_CMD, &MOTOR_B_CMD, &MOTOR_B_RESET) {
-        warn!("Business init failed: {:?}", e);
-    }
-
-    // Spawn motor reset handlers (business logic)
-    if let Err(e) = spawner.spawn(business::run_motor_reset_handler(
-        "A",
-        &MOTOR_A_CMD,
-        &ANGLE_A_CH,
-        &SPEED_A_CH,
-        &MOTOR_A_RESET,
-    )) {
-        warn!("Spawn motor A reset handler failed: {:?}", e);
-    }
-
-    // Extract touch (motors are now driven via command channels in business layer)
-    let touch = board.touch;
 
     // Wrap touch in SharedFT6336 with telemetry sender via Watch
     let shared_touch = m5_minimal::hardware::SharedFT6336::new(
@@ -149,9 +123,24 @@ async fn main(spawner: Spawner) -> ! {
         Some(TelemetrySender::from_watch(&TOUCH_CH)),
     );
 
-    // Spawn touch reader background task
-    if let Err(e) = spawner.spawn(run_touch_reader(shared_touch)) {
-        warn!("Spawn touch reader failed: {:?}", e);
+    if let Err(e) = ui::init_touch_reader(&spawner, shared_touch) {
+        warn!("UI init_touch_reader failed: {:?}", e);
+    }
+
+    // === Business Layer Initialization ===
+    if let Err(e) = business::init_motors(
+        &spawner,
+        motor_a,
+        motor_b,
+        &MOTOR_A_CMD,
+        &MOTOR_B_CMD,
+        &MOTOR_A_RESET,
+        &MOTOR_B_RESET,
+        &ANGLE_A_CH,
+        &SPEED_A_CH,
+        &SPEED_B_CH,
+    ) {
+        warn!("Business init_motors failed: {:?}", e);
     }
 
     // Spawn button router and action handler (business logic)
@@ -176,79 +165,5 @@ async fn main(spawner: Spawner) -> ! {
             counter = 0;
         }
     }
-}
-
-/// Task: Display service - manages screens, navigation, and button registration
-#[embassy_executor::task]
-async fn run_display_service(
-    service: DisplayService,
-    screen_watch: &'static Watch<CriticalSectionRawMutex, m5_minimal::ui::Screen, 4>,
-    countdown_watch: &'static Watch<CriticalSectionRawMutex, u8, 4>,
-    angle_a_watch: &'static Watch<CriticalSectionRawMutex, u16, 8>,
-    angle_b_watch: &'static Watch<CriticalSectionRawMutex, u16, 8>,
-) {
-    service
-        .run(screen_watch, countdown_watch, angle_a_watch, angle_b_watch)
-        .await;
-}
-
-/// Task: Manage screen navigation (splash -> dashboard)
-#[embassy_executor::task]
-async fn run_navigation() {
-    use m5_minimal::ui::Screen;
-
-    info!("Navigation task: starting splash screen");
-
-    // Initialize with Splash screen
-    SCREEN_CH.sender().send(Screen::Splash);
-
-    // Countdown from 4 to 1 seconds
-    for countdown in (1..=4).rev() {
-        COUNTDOWN_CH.sender().send(countdown);
-        Timer::after(Duration::from_secs(1)).await;
-    }
-
-    // Switch to Dashboard
-    info!("Navigation: switching to dashboard");
-    SCREEN_CH.sender().send(Screen::Dashboard);
-
-    // Navigation task complete - screen stays on dashboard
-    loop {
-        Timer::after(Duration::from_secs(3600)).await;
-    }
-}
-
-/// Task: Read touch events via SharedFT6336
-#[embassy_executor::task]
-async fn run_touch_reader(
-    shared_touch: m5_minimal::hardware::SharedFT6336<
-        esp_hal::i2c::master::I2c<'static, esp_hal::Blocking>,
-        4,
-    >,
-) {
-    info!("Touch reader task starting...");
-
-    // Run the background task for continuous polling and telemetry
-    shared_touch.run_background_task().await
-}
-
-/// Task: Motor A background processing (command handler + encoder polling)
-#[embassy_executor::task]
-async fn run_motor_a_background(
-    motor: m5_minimal::hardware::SharedRoller485<
-        m5_minimal::hardware::RollerI2cDevice,
-    >,
-) {
-    motor.run_background_task("A", None).await
-}
-
-/// Task: Motor B background processing (command handler + encoder polling)
-#[embassy_executor::task]
-async fn run_motor_b_background(
-    motor: m5_minimal::hardware::SharedRoller485<
-        m5_minimal::hardware::RollerI2cDevice,
-    >,
-) {
-    motor.run_background_task("B", None).await
 }
 

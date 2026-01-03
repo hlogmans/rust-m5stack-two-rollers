@@ -26,7 +26,20 @@ pub async fn run_motor_test(
         for _ in 0..10 {
             cmd_ch.send(MotorCommand::SetSpeed(speed)).await;
             speed *= -2;
-            Timer::after(Duration::from_millis(500)).await;
+
+            // a next value in the reset_ch will interrupt the test
+            // so, which is earlier, the timeout or a reset?
+            let timeout_fut = Timer::after(Duration::from_millis(500));
+            let reset_fut = reset_ch.receive();
+            let result = embassy_futures::select::select(timeout_fut, reset_fut).await;
+            if result.is_first() {
+                // timeout completed, continue to next speed
+                continue;
+            } else {
+                // reset received, abort test
+                info!("Motor {} test task aborted by reset", name);
+                break;
+            }
         }
 
         cmd_ch.send(MotorCommand::SetSpeed(0)).await;
