@@ -13,7 +13,6 @@ pub mod display;
 use alloc::boxed::Box;
 use core::cell::RefCell;
 
-use self::display::Display;
 use crate::helpers::TelemetrySender;
 use crate::{info, warn};
 use critical_section::Mutex;
@@ -41,6 +40,9 @@ pub type CoreS3Display<'a> = mipidsi::Display<
     mipidsi::models::ILI9342CRgb565,
     esp_hal::gpio::Output<'a>,
 >;
+
+/// Type alias for the MVVM Display wrapper
+pub use crate::ui::display_service::Display;
 
 type ManagedI2cBus = Mutex<RefCell<I2c<'static, esp_hal::Blocking>>>;
 type ManagedI2cDevice = CriticalSectionDevice<'static, I2c<'static, esp_hal::Blocking>>;
@@ -200,7 +202,8 @@ where
             gpio_dc,
             gpio_rst,
         };
-        let display = display::init(disp_pins, display_buffer);
+        let raw_display = display::init(disp_pins, display_buffer);
+        let display = Display::new(raw_display, crate::hardware::display::W, crate::hardware::display::H);
         
         // Grove I2C bus (Port B) - Motors at 0x65 (A) and 0x64 (B)
         info!("Initializing I2C1 for Grove port B (motors)...");

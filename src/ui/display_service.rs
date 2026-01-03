@@ -9,14 +9,66 @@
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::watch::Watch;
 use embassy_futures::select;
+use embedded_graphics::pixelcolor::Rgb565;
+use embedded_graphics::prelude::DrawTarget;
 
 use crate::business::input;
 use crate::ui::screen::Screen;
 use crate::ui::{ScreenController, ScreenEvent};
 use crate::ui::views::{SplashView, DashboardView};
-use crate::hardware::display::Display;
+use crate::ui::view_models::DashboardViewModel;
 use crate::hardware::CoreS3Display;
 use crate::info;
+
+/// Display wrapper with MVVM architecture support
+///
+/// Combines hardware driver with view model management for easy screen updates.
+pub struct Display<D: DrawTarget<Color = Rgb565>> {
+    driver: D,
+    view_model: DashboardViewModel,
+    view: DashboardView,
+}
+
+impl<D: DrawTarget<Color = Rgb565>> Display<D> {
+    /// Create a new display wrapper with MVVM support
+    pub fn new(driver: D, width: u32, height: u32) -> Self {
+        let view_model = DashboardViewModel::new();
+        let view = DashboardView::new(width, height);
+        Self {
+            driver,
+            view_model,
+            view,
+        }
+    }
+
+    /// Get a mutable reference to the underlying driver for custom rendering
+    pub fn driver_mut(&mut self) -> &mut D {
+        &mut self.driver
+    }
+
+    /// Initialize UI (render static elements)
+    pub fn init_angle_display(&mut self) {
+        info!("Initializing dashboard UI (MVVM)");
+        let _ = self.view.init(&mut self.driver);
+
+        let _ = self.view.update(&mut self.driver, &self.view_model, true);
+    }
+
+    /// Update display with dual motor angles (MVVM pattern)
+    pub fn update_dual_angles(&mut self, angle_a: u16, angle_b: u16) {
+        // Update ViewModel (business/presentation state)
+        self.view_model.update_motor_a_angle(angle_a);
+        self.view_model.update_motor_b_angle(angle_b);
+
+        // Render ViewModel to screen (View layer)
+        let _ = self.view.update(&mut self.driver, &self.view_model, false);
+    }
+
+    /// Get mutable reference to view model (for future extensions)
+    pub fn view_model_mut(&mut self) -> &mut DashboardViewModel {
+        &mut self.view_model
+    }
+}
 
 /// Active screen wrapper - enum of all possible screens
 enum ActiveScreen {
