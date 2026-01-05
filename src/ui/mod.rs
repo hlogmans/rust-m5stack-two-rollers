@@ -14,14 +14,16 @@ pub mod views;
 pub mod framework;
 pub mod screen;
 pub mod buttons;
+pub mod screens;
 pub mod screen_trait;
 pub mod display_service;
 pub mod init;
 
 pub use screen_trait::{ScreenController, ScreenEvent};
 pub use display_service::DisplayService;
-pub use init::{init_display_service, init_navigation};
+pub use init::{init_display_service, init_navigation, init_dashboard_view_model};
 
 pub use view_models::{DashboardViewModel, MotorViewModel};
 pub use views::{DashboardView, SplashView};
+pub use screens::{DashboardScreen, SplashScreen};
 pub use screen::Screen;

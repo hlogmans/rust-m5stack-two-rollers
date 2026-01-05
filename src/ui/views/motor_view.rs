@@ -4,7 +4,7 @@
 
 use crate::ui::view_models::MotorViewModel;
 use embedded_graphics::{
-    mono_font::{MonoTextStyle, ascii::FONT_10X20},
+    mono_font::{MonoTextStyle, MonoTextStyleBuilder, ascii::FONT_10X20},
     pixelcolor::Rgb565,
     prelude::*,
     primitives::{Circle, PrimitiveStyle},
@@ -60,22 +60,15 @@ impl MotorView {
             .draw(target)?;
         }
 
-        // Erase previous indicator by redrawing in background color
-        if let Some(old_angle) = self.previous_angle {
-            let text_style = MonoTextStyle::new(&FONT_10X20, Rgb565::BLACK);
-            let angle_text = view_model.angle_text(old_angle);
-            Text::new(
-                angle_text.as_str(),
-                Point::new(self.center_x - 25, label_y + 25),
-                text_style,
-            )
-            .draw(target)?;
-                    // Draw circular angle indicator
-            self.draw_angle_indicator(target, old_angle, initial, true)?; // remove
-        }
+        // Redraw marker in a single batched iterator (erase old + draw new) to avoid flicker
+        self.draw_angle_indicator(target, self.previous_angle, view_model.angle, initial)?;
 
-        // Draw angle value
-        let text_style = MonoTextStyle::new(&FONT_10X20, Rgb565::WHITE);
+        // Draw angle value with background set to avoid flicker (single draw)
+        let text_style: MonoTextStyle<'_, Rgb565> = MonoTextStyleBuilder::new()
+            .font(&FONT_10X20)
+            .text_color(Rgb565::WHITE)
+            .background_color(Rgb565::BLACK)
+            .build();
         let angle_text = view_model.angle_text(view_model.angle);
         Text::new(
             angle_text.as_str(),
@@ -83,11 +76,6 @@ impl MotorView {
             text_style,
         )
         .draw(target)?;
-
-
-
-        // Draw circular angle indicator
-        self.draw_angle_indicator(target, view_model.angle, initial, false)?; // draw
 
         self.previous_angle = Some(view_model.angle);
         Ok(())
@@ -97,9 +85,9 @@ impl MotorView {
     fn draw_angle_indicator<D>(
         &self,
         target: &mut D,
-        angle: u16,
+        previous_angle: Option<u16>,
+        new_angle: u16,
         initial: bool,
-        remove: bool
     ) -> Result<(), D::Error>
     where
         D: DrawTarget<Color = Rgb565>,
@@ -111,20 +99,27 @@ impl MotorView {
                 .draw(target)?;
         }
 
-        // Position marker based on angle (0° = right, clockwise)
-        let radians = ((angle as f32 - 90.0) * core::f32::consts::PI) / 180.0;
-        let marker_x = self.center_x + (25.0 * radians.cos()) as i32;
-        let marker_y = self.center_y + (25.0 * radians.sin()) as i32;
-
-        let color_to_use = if remove {
-            Rgb565::BLACK
-        } else {
-            self.color
+        let marker_pixels = |angle: u16, color: Rgb565| {
+            let radians = ((angle as f32 - 90.0) * core::f32::consts::PI) / 180.0;
+            let marker_x = self.center_x + (25.0 * radians.cos()) as i32;
+            let marker_y = self.center_y + (25.0 * radians.sin()) as i32;
+            Circle::new(Point::new(marker_x - 5, marker_y - 5), 10)
+                .into_styled(PrimitiveStyle::with_fill(color))
+                .pixels()
         };
 
-        Circle::new(Point::new(marker_x - 5, marker_y - 5), 10)
-            .into_styled(PrimitiveStyle::with_fill(color_to_use))
-            .draw(target)?;
+        match previous_angle {
+            Some(old) => {
+                // Batch erase (bg) + draw (fg) in one iterator to minimize visible flicker
+                target.draw_iter(
+                    marker_pixels(old, Rgb565::BLACK)
+                        .chain(marker_pixels(new_angle, self.color)),
+                )?;
+            }
+            None => {
+                target.draw_iter(marker_pixels(new_angle, self.color))?;
+            }
+        }
 
         Ok(())
     }

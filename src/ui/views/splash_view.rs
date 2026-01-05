@@ -11,8 +11,6 @@ use embedded_graphics::{
 };
 
 use crate::ui::buttons::ButtonSpec;
-use crate::ui::screen_trait::{ScreenController, ScreenEvent};
-use crate::hardware::CoreS3Display;
 
 /// Splash screen view (framework-specific rendering)
 pub struct SplashView {
@@ -30,7 +28,7 @@ impl SplashView {
     }
 
     /// Initialize the splash screen (draw static elements)
-    fn init<D>(&self, target: &mut D) -> Result<(), D::Error>
+    pub fn init<D>(&self, target: &mut D) -> Result<(), D::Error>
     where
         D: DrawTarget<Color = Rgb565>,
     {
@@ -75,7 +73,7 @@ impl SplashView {
     }
 
     /// Update the countdown timer
-    fn update_countdown<D>(&self, target: &mut D, seconds_left: u8) -> Result<(), D::Error>
+    pub fn update_countdown<D>(&self, target: &mut D, seconds_left: u8) -> Result<(), D::Error>
     where
         D: DrawTarget<Color = Rgb565>,
     {
@@ -99,33 +97,19 @@ impl SplashView {
 
         Ok(())
     }
-}
 
-impl ScreenController for SplashView {
-    type Driver = CoreS3Display<'static>;
-
-    fn open(&mut self, display: &mut Self::Driver) -> Result<&[ButtonSpec], <Self::Driver as DrawTarget>::Error> {
-        self.init(display)?;
-        self.update_countdown(display, self.countdown)?;
-        Ok(&[])
+    /// Current countdown value
+    pub fn countdown(&self) -> u8 {
+        self.countdown
     }
 
-    fn update(&mut self, display: &mut Self::Driver, event: ScreenEvent) -> Result<(), <Self::Driver as DrawTarget>::Error> {
-        match event {
-            ScreenEvent::Countdown(value) => {
-                self.countdown = value;
-                self.update_countdown(display, value)?;
-            }
-            _ => {}
-        }
-        Ok(())
+    /// Set countdown value (used by screen controller)
+    pub fn set_countdown(&mut self, value: u8) {
+        self.countdown = value;
     }
 
-    fn close(&mut self, _display: &mut Self::Driver) -> Result<(), <Self::Driver as DrawTarget>::Error> {
-        Ok(())
-    }
-
-    fn buttons(&self) -> &[ButtonSpec] {
+    /// Splash has no interactive buttons
+    pub fn buttons(&self) -> &[ButtonSpec] {
         &[]
     }
 }

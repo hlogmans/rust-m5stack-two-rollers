@@ -14,6 +14,8 @@ pub enum ScreenEvent {
     AngleB(u16),
     /// Countdown timer changed
     Countdown(u8),
+    /// Full dashboard view model update
+    DashboardModel(crate::ui::DashboardViewModel),
 }
 
 /// Screen lifecycle trait - all screens must implement this

@@ -33,9 +33,9 @@ impl ButtonSpec {
 pub fn dashboard_buttons() -> [ButtonSpec; 2] {
     [
         // ZERO A button: Rectangle::new(Point::new(20, 200), Size::new(120, 35))
-        ButtonSpec::rect(ButtonId::ZeroA, 20, 200, 120, 35),
+        ButtonSpec::rect(ButtonId::ZeroA, 20, 200, 120, 50),
         // ZERO B button: Rectangle::new(Point::new(180, 200), Size::new(120, 35))
-        ButtonSpec::rect(ButtonId::ZeroB, 180, 200, 120, 35),
+        ButtonSpec::rect(ButtonId::ZeroB, 180, 200, 120, 50),
     ]
 }
 

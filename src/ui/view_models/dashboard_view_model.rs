@@ -5,7 +5,7 @@
 use super::MotorViewModel;
 
 /// ViewModel for the main dashboard showing both motors
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct DashboardViewModel {
     /// Motor A state
     pub motor_a: MotorViewModel,

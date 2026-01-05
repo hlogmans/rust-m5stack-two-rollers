@@ -15,8 +15,7 @@ use embedded_graphics::prelude::DrawTarget;
 use crate::business::input;
 use crate::ui::screen::Screen;
 use crate::ui::{ScreenController, ScreenEvent};
-use crate::ui::views::{SplashView, DashboardView};
-use crate::ui::view_models::DashboardViewModel;
+use crate::ui::screens::{SplashScreen, DashboardScreen};
 use crate::hardware::CoreS3Display;
 use crate::info;
 
@@ -25,55 +24,25 @@ use crate::info;
 /// Combines hardware driver with view model management for easy screen updates.
 pub struct Display<D: DrawTarget<Color = Rgb565>> {
     driver: D,
-    view_model: DashboardViewModel,
-    view: DashboardView,
 }
 
 impl<D: DrawTarget<Color = Rgb565>> Display<D> {
     /// Create a new display wrapper with MVVM support
     pub fn new(driver: D, width: u32, height: u32) -> Self {
-        let view_model = DashboardViewModel::new();
-        let view = DashboardView::new(width, height);
-        Self {
-            driver,
-            view_model,
-            view,
-        }
+        let _ = (width, height); // retain signature for existing callers
+        Self { driver }
     }
 
     /// Get a mutable reference to the underlying driver for custom rendering
     pub fn driver_mut(&mut self) -> &mut D {
         &mut self.driver
     }
-
-    /// Initialize UI (render static elements)
-    pub fn init_angle_display(&mut self) {
-        info!("Initializing dashboard UI (MVVM)");
-        let _ = self.view.init(&mut self.driver);
-
-        let _ = self.view.update(&mut self.driver, &self.view_model, true);
-    }
-
-    /// Update display with dual motor angles (MVVM pattern)
-    pub fn update_dual_angles(&mut self, angle_a: u16, angle_b: u16) {
-        // Update ViewModel (business/presentation state)
-        self.view_model.update_motor_a_angle(angle_a);
-        self.view_model.update_motor_b_angle(angle_b);
-
-        // Render ViewModel to screen (View layer)
-        let _ = self.view.update(&mut self.driver, &self.view_model, false);
-    }
-
-    /// Get mutable reference to view model (for future extensions)
-    pub fn view_model_mut(&mut self) -> &mut DashboardViewModel {
-        &mut self.view_model
-    }
 }
 
 /// Active screen wrapper - enum of all possible screens
 enum ActiveScreen {
-    Splash(SplashView),
-    Dashboard(DashboardView),
+    Splash(SplashScreen),
+    Dashboard(DashboardScreen),
 }
 
 impl ScreenController for ActiveScreen {
@@ -111,8 +80,8 @@ impl ScreenController for ActiveScreen {
 /// The DisplayService manages screen lifecycle and rendering
 pub struct DisplayService {
     display: Display<CoreS3Display<'static>>,
-    splash: SplashView,
-    dashboard: DashboardView,
+    splash: SplashScreen,
+    dashboard: DashboardScreen,
 }
 
 impl DisplayService {
@@ -120,8 +89,8 @@ impl DisplayService {
     pub fn new(display: Display<CoreS3Display<'static>>) -> Self {
         Self {
             display,
-            splash: SplashView::new(320, 240),
-            dashboard: DashboardView::new(320, 240),
+            splash: SplashScreen::new(320, 240),
+            dashboard: DashboardScreen::new(320, 240),
         }
     }
 
@@ -132,6 +101,7 @@ impl DisplayService {
         countdown_watch: &'static Watch<CriticalSectionRawMutex, u8, 4>,
         angle_a_watch: &'static Watch<CriticalSectionRawMutex, u16, 8>,
         angle_b_watch: &'static Watch<CriticalSectionRawMutex, u16, 8>,
+        dashboard_view_model_watch: &'static Watch<CriticalSectionRawMutex, crate::ui::DashboardViewModel, 2>,
     ) {
         info!("DisplayService: starting");
 
@@ -147,12 +117,15 @@ impl DisplayService {
         let mut angle_b_rx = angle_b_watch
             .receiver()
             .expect("Failed to create angle B receiver");
+        let mut dashboard_vm_rx = dashboard_view_model_watch
+            .receiver()
+            .expect("Failed to create dashboard view model receiver");
 
         // Start with splash screen
         let mut current_screen = Screen::Splash;
         let mut active_screen = ActiveScreen::Splash(core::mem::replace(
             &mut self.splash,
-            SplashView::new(320, 240),
+            SplashScreen::new(320, 240),
         ));
         
         // Open initial screen
@@ -162,15 +135,16 @@ impl DisplayService {
 
         loop {
             // Wait for any event
-            let event = select::select4(
+            let event = select::select5(
                 screen_rx.changed(),
                 countdown_rx.changed(),
                 angle_a_rx.changed(),
                 angle_b_rx.changed(),
+                dashboard_vm_rx.changed(),
             ).await;
 
             match event {
-                select::Either4::First(new_screen) => {
+                select::Either5::First(new_screen) => {
                     if new_screen != current_screen {
                         info!("DisplayService: navigating to {:?}", new_screen);
                         
@@ -182,12 +156,12 @@ impl DisplayService {
                         current_screen = new_screen;
                         active_screen = match current_screen {
                             Screen::Splash => {
-                                let view = core::mem::replace(&mut self.splash, SplashView::new(320, 240));
-                                ActiveScreen::Splash(view)
+                                let screen = core::mem::replace(&mut self.splash, SplashScreen::new(320, 240));
+                                ActiveScreen::Splash(screen)
                             }
                             Screen::Dashboard => {
-                                let view = core::mem::replace(&mut self.dashboard, DashboardView::new(320, 240));
-                                ActiveScreen::Dashboard(view)
+                                let screen = core::mem::replace(&mut self.dashboard, DashboardScreen::new(320, 240));
+                                ActiveScreen::Dashboard(screen)
                             }
                         };
                         
@@ -197,22 +171,28 @@ impl DisplayService {
                         }
                     }
                 }
-                select::Either4::Second(countdown) => {
+                select::Either5::Second(countdown) => {
                     let _ = active_screen.update(
                         self.display.driver_mut(),
                         ScreenEvent::Countdown(countdown)
                     );
                 }
-                select::Either4::Third(angle_a) => {
+                select::Either5::Third(angle_a) => {
                     let _ = active_screen.update(
                         self.display.driver_mut(),
                         ScreenEvent::AngleA(angle_a)
                     );
                 }
-                select::Either4::Fourth(angle_b) => {
+                select::Either5::Fourth(angle_b) => {
                     let _ = active_screen.update(
                         self.display.driver_mut(),
                         ScreenEvent::AngleB(angle_b)
+                    );
+                }
+                select::Either5::Fifth(vm) => {
+                    let _ = active_screen.update(
+                        self.display.driver_mut(),
+                        ScreenEvent::DashboardModel(vm)
                     );
                 }
             }

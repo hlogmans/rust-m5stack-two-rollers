@@ -18,6 +18,8 @@ pub enum InitError {
     SpawnDisplayService,
     /// Failed to spawn navigation task.
     SpawnNavigation,
+    /// Failed to spawn dashboard view model aggregator.
+    SpawnDashboardViewModel,
 }
 
 /// Initialize all UI-related tasks.
@@ -41,6 +43,7 @@ pub fn init_display_service(
     countdown_watch: &'static Watch<CriticalSectionRawMutex, u8, 4>,
     angle_a_watch: &'static Watch<CriticalSectionRawMutex, u16, 8>,
     angle_b_watch: &'static Watch<CriticalSectionRawMutex, u16, 8>,
+    dashboard_view_model_watch: &'static Watch<CriticalSectionRawMutex, crate::ui::DashboardViewModel, 2>,
 ) -> Result<(), InitError> {
     spawner
         .spawn(run_display_service(
@@ -49,6 +52,7 @@ pub fn init_display_service(
             countdown_watch,
             angle_a_watch,
             angle_b_watch,
+            dashboard_view_model_watch,
         ))
         .map_err(|_| InitError::SpawnDisplayService)?;
 
@@ -76,10 +80,35 @@ async fn run_display_service(
     countdown_watch: &'static Watch<CriticalSectionRawMutex, u8, 4>,
     angle_a_watch: &'static Watch<CriticalSectionRawMutex, u16, 8>,
     angle_b_watch: &'static Watch<CriticalSectionRawMutex, u16, 8>,
+    dashboard_view_model_watch: &'static Watch<CriticalSectionRawMutex, crate::ui::DashboardViewModel, 2>,
 ) {
     service
-        .run(screen_watch, countdown_watch, angle_a_watch, angle_b_watch)
+        .run(
+            screen_watch,
+            countdown_watch,
+            angle_a_watch,
+            angle_b_watch,
+            dashboard_view_model_watch,
+        )
         .await;
+}
+
+/// Initialize dashboard view model aggregator (angles -> view model pushes).
+pub fn init_dashboard_view_model(
+    spawner: &Spawner,
+    angle_a_watch: &'static Watch<CriticalSectionRawMutex, u16, 8>,
+    angle_b_watch: &'static Watch<CriticalSectionRawMutex, u16, 8>,
+    dashboard_view_model_watch: &'static Watch<CriticalSectionRawMutex, crate::ui::DashboardViewModel, 2>,
+) -> Result<(), InitError> {
+    spawner
+        .spawn(run_dashboard_view_model(
+            angle_a_watch,
+            angle_b_watch,
+            dashboard_view_model_watch,
+        ))
+        .map_err(|_| InitError::SpawnDashboardViewModel)?;
+
+    Ok(())
 }
 
 /// Task: Manage screen navigation (splash -> dashboard)
@@ -109,5 +138,34 @@ async fn run_navigation(
     // Navigation task complete - screen stays on dashboard
     loop {
         Timer::after(Duration::from_secs(3600)).await;
+    }
+}
+
+/// Task: Build a DashboardViewModel from motor telemetry and push when either motor changes.
+#[embassy_executor::task]
+async fn run_dashboard_view_model(
+    angle_a_watch: &'static Watch<CriticalSectionRawMutex, u16, 8>,
+    angle_b_watch: &'static Watch<CriticalSectionRawMutex, u16, 8>,
+    dashboard_view_model_watch: &'static Watch<CriticalSectionRawMutex, crate::ui::DashboardViewModel, 2>,
+) {
+    use embassy_futures::select::{select, Either};
+
+    let mut rx_a = angle_a_watch.receiver().expect("Failed to create angle A receiver");
+    let mut rx_b = angle_b_watch.receiver().expect("Failed to create angle B receiver");
+
+    let mut vm = crate::ui::DashboardViewModel::new();
+    dashboard_view_model_watch.sender().send(vm);
+
+    loop {
+        match select(rx_a.changed(), rx_b.changed()).await {
+            Either::First(angle_a) => {
+                vm.update_motor_a_angle(angle_a);
+            }
+            Either::Second(angle_b) => {
+                vm.update_motor_b_angle(angle_b);
+            }
+        }
+
+        dashboard_view_model_watch.sender().send(vm);
     }
 }

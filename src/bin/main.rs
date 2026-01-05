@@ -15,6 +15,7 @@ use m5_minimal::helpers::{print_memory_diagnostics, print_memory_stats};
 use m5_minimal::{info, warn}; // provides panic handler with backtrace via esp-println
 use m5_minimal::business;
 use m5_minimal::ui;
+use m5_minimal::ui::DashboardViewModel;
 
 use alloc::boxed::Box;
 use embassy_executor::Spawner;
@@ -41,6 +42,9 @@ static ANGLE_B_CH: Watch<CriticalSectionRawMutex, u16, 8> = Watch::new();
 static SPEED_B_CH: Watch<CriticalSectionRawMutex, f32, 4> = Watch::new();
 static MOTOR_B_CMD: Channel<CriticalSectionRawMutex, m5_minimal::hardware::MotorCommand, 4> =
     Channel::new();
+
+// Dashboard view model (coarse UI state)
+static DASHBOARD_VM_CH: Watch<CriticalSectionRawMutex, DashboardViewModel, 2> = Watch::new();
 
 // Touch events - now a Channel for confirmed presses only
 static TOUCH_CH: Channel<CriticalSectionRawMutex, ConfirmedPress, 8> = Channel::new();
@@ -108,12 +112,17 @@ async fn main(spawner: Spawner) -> ! {
         &COUNTDOWN_CH,
         &ANGLE_A_CH,
         &ANGLE_B_CH,
+        &DASHBOARD_VM_CH,
     ) {
         warn!("UI init_display_service failed: {:?}", e);
     }
 
     if let Err(e) = ui::init_navigation(&spawner, &SCREEN_CH, &COUNTDOWN_CH) {
         warn!("UI init_navigation failed: {:?}", e);
+    }
+
+    if let Err(e) = ui::init_dashboard_view_model(&spawner, &ANGLE_A_CH, &ANGLE_B_CH, &DASHBOARD_VM_CH) {
+        warn!("UI init_dashboard_view_model failed: {:?}", e);
     }
 
     // Wrap touch in SharedFT6336 with debounced press channel and spawn background task
