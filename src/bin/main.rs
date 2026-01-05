@@ -17,7 +17,6 @@ use m5_minimal::business;
 use m5_minimal::ui;
 use m5_minimal::ui::DashboardViewModel;
 
-use alloc::boxed::Box;
 use embassy_executor::Spawner;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
@@ -26,32 +25,6 @@ use embassy_time::{Duration, Timer};
 use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
 use m5_minimal::business::input;
-
-// Global channels for Motor A telemetry and commands
-static ANGLE_A_CH: Watch<CriticalSectionRawMutex, u16, 8> = Watch::new();
-static SPEED_A_CH: Watch<CriticalSectionRawMutex, f32, 4> = Watch::new();
-static MOTOR_A_CMD: Channel<CriticalSectionRawMutex, m5_minimal::hardware::MotorCommand, 4> =
-    Channel::new();
-
-// Business logic: reset triggers per motor
-static MOTOR_A_RESET: Channel<CriticalSectionRawMutex, (), 1> = Channel::new();
-static MOTOR_B_RESET: Channel<CriticalSectionRawMutex, (), 1> = Channel::new();
-
-// Display gets angle updates for both motors
-static ANGLE_B_CH: Watch<CriticalSectionRawMutex, u16, 8> = Watch::new();
-static SPEED_B_CH: Watch<CriticalSectionRawMutex, f32, 4> = Watch::new();
-static MOTOR_B_CMD: Channel<CriticalSectionRawMutex, m5_minimal::hardware::MotorCommand, 4> =
-    Channel::new();
-
-// Dashboard view model (coarse UI state)
-static DASHBOARD_VM_CH: Watch<CriticalSectionRawMutex, DashboardViewModel, 2> = Watch::new();
-
-// Touch events - now a Channel for confirmed presses only
-static TOUCH_CH: Channel<CriticalSectionRawMutex, ConfirmedPress, 8> = Channel::new();
-
-// Screen navigation
-static SCREEN_CH: Watch<CriticalSectionRawMutex, m5_minimal::ui::Screen, 4> = Watch::new();
-static COUNTDOWN_CH: Watch<CriticalSectionRawMutex, u8, 4> = Watch::new();
 
 // Panic handling is provided by esp-backtrace (print-uart feature) for stack traces
 
@@ -72,6 +45,32 @@ async fn main(spawner: Spawner) -> ! {
 
     esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 73744);
 
+    // Global channels for Motor A telemetry and commands
+    static ANGLE_A_CH: Watch<CriticalSectionRawMutex, u16, 8> = Watch::new();
+    static SPEED_A_CH: Watch<CriticalSectionRawMutex, f32, 4> = Watch::new();
+    static MOTOR_A_CMD: Channel<CriticalSectionRawMutex, m5_minimal::hardware::MotorCommand, 4> =
+        Channel::new();
+
+    // Business logic: reset triggers per motor
+    static MOTOR_A_RESET: Channel<CriticalSectionRawMutex, (), 1> = Channel::new();
+    static MOTOR_B_RESET: Channel<CriticalSectionRawMutex, (), 1> = Channel::new();
+
+    // Display gets angle updates for both motors
+    static ANGLE_B_CH: Watch<CriticalSectionRawMutex, u16, 8> = Watch::new();
+    static SPEED_B_CH: Watch<CriticalSectionRawMutex, f32, 4> = Watch::new();
+    static MOTOR_B_CMD: Channel<CriticalSectionRawMutex, m5_minimal::hardware::MotorCommand, 4> =
+        Channel::new();
+
+    // Dashboard view model (coarse UI state)
+    static DASHBOARD_VM_CH: Watch<CriticalSectionRawMutex, DashboardViewModel, 2> = Watch::new();
+
+    // Touch events - now a Channel for confirmed presses only
+    static TOUCH_CH: Channel<CriticalSectionRawMutex, ConfirmedPress, 8> = Channel::new();
+
+    // Screen navigation
+    static SCREEN_CH: Watch<CriticalSectionRawMutex, m5_minimal::ui::Screen, 4> = Watch::new();
+    static COUNTDOWN_CH: Watch<CriticalSectionRawMutex, u8, 4> = Watch::new();
+
     // Start embassy executor timer FIRST - needed for any async operations
     let (timg0, peripherals) = m5_minimal::hardware::split_peripherals(peripherals);
     let timg0 = TimerGroup::new(timg0);
@@ -83,7 +82,8 @@ async fn main(spawner: Spawner) -> ! {
     print_memory_diagnostics();
 
     // Initialize all hardware (power, display, and two Roller485 motors on separate I2C buses)
-    let display_buffer: &'static mut [u8; 512] = Box::leak(Box::new([0_u8; 512]));
+    static DISPLAY_BUFFER: static_cell::StaticCell<[u8; 512]> = static_cell::StaticCell::new();
+    let display_buffer = DISPLAY_BUFFER.init([0_u8; 512]);
     let board = Board::init(
         peripherals,
         display_buffer,
@@ -97,8 +97,10 @@ async fn main(spawner: Spawner) -> ! {
     .await;
 
     // Clone motors BEFORE display moves into DisplayService
-    let motor_a = Box::leak(Box::new(board.roller_a.clone()));
-    let motor_b = Box::leak(Box::new(board.roller_b.clone()));
+    static MOTOR_A: static_cell::StaticCell<m5_minimal::hardware::SharedRoller485<m5_minimal::hardware::RollerI2cDevice>> = static_cell::StaticCell::new();
+    let motor_a = MOTOR_A.init(board.roller_a.clone());
+    static MOTOR_B: static_cell::StaticCell<m5_minimal::hardware::SharedRoller485<m5_minimal::hardware::RollerI2cDevice>> = static_cell::StaticCell::new();
+    let motor_b = MOTOR_B.init(board.roller_b.clone());
 
     // Extract touch and display
     let touch = board.touch;

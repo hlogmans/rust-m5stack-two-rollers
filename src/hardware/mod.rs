@@ -10,7 +10,6 @@ pub mod touch;
 pub mod aw9523;
 pub mod display;
 
-use alloc::boxed::Box;
 use core::cell::RefCell;
 
 use crate::helpers::TelemetrySender;
@@ -239,7 +238,8 @@ where
         .expect("Failed to create I2C1")
         .with_sda(i2c1_sda)
         .with_scl(i2c1_scl);
-        let i2c1_shared: &'static ManagedI2cBus = Box::leak(Box::new(Mutex::new(RefCell::new(i2c1_bus))));
+        static I2C1_BUS: static_cell::StaticCell<ManagedI2cBus> = static_cell::StaticCell::new();
+        let i2c1_shared = I2C1_BUS.init(Mutex::new(RefCell::new(i2c1_bus)));
 
         info!("Initializing Roller485 Motor A at address 0x65 on I2C1 (Port B)...");
         let mut roller_a = Roller485::new_with_address(
