@@ -116,14 +116,14 @@ async fn main(spawner: Spawner) -> ! {
         warn!("UI init_navigation failed: {:?}", e);
     }
 
-    // Wrap touch in SharedFT6336 with debounced press channel
+    // Wrap touch in SharedFT6336 with debounced press channel and spawn background task
     let shared_touch = m5_minimal::hardware::SharedFT6336::new(
         touch,
         Some(TOUCH_CH.sender()),
     );
 
-    if let Err(e) = ui::init_touch_reader(&spawner, shared_touch) {
-        warn!("UI init_touch_reader failed: {:?}", e);
+    if let Err(e) = m5_minimal::hardware::init_touch(&spawner, shared_touch) {
+        warn!("Hardware init_touch failed: {:?}", e);
     }
 
     // === Business Layer Initialization ===

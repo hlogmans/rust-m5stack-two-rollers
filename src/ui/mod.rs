@@ -20,7 +20,7 @@ pub mod init;
 
 pub use screen_trait::{ScreenController, ScreenEvent};
 pub use display_service::DisplayService;
-pub use init::{init_display_service, init_navigation, init_touch_reader};
+pub use init::{init_display_service, init_navigation};
 
 pub use view_models::{DashboardViewModel, MotorViewModel};
 pub use views::{DashboardView, SplashView};

@@ -18,8 +18,6 @@ pub enum InitError {
     SpawnDisplayService,
     /// Failed to spawn navigation task.
     SpawnNavigation,
-    /// Failed to spawn touch reader task.
-    SpawnTouchReader,
 }
 
 /// Initialize all UI-related tasks.
@@ -70,21 +68,6 @@ pub fn init_navigation(
     Ok(())
 }
 
-/// Initialize touch reader task.
-pub fn init_touch_reader(
-    spawner: &Spawner,
-    shared_touch: crate::hardware::SharedFT6336<
-        esp_hal::i2c::master::I2c<'static, esp_hal::Blocking>,
-        8,
-    >,
-) -> Result<(), InitError> {
-    spawner
-        .spawn(run_touch_reader(shared_touch))
-        .map_err(|_| InitError::SpawnTouchReader)?;
-
-    Ok(())
-}
-
 /// Task: Display service - manages screens, navigation, and button registration
 #[embassy_executor::task]
 async fn run_display_service(
@@ -127,20 +110,4 @@ async fn run_navigation(
     loop {
         Timer::after(Duration::from_secs(3600)).await;
     }
-}
-
-/// Task: Read touch events via SharedFT6336
-#[embassy_executor::task]
-async fn run_touch_reader(
-    shared_touch: crate::hardware::SharedFT6336<
-        esp_hal::i2c::master::I2c<'static, esp_hal::Blocking>,
-        8,
-    >,
-) {
-    use defmt::info;
-
-    info!("Touch reader task starting...");
-
-    // Run the background task for continuous polling and telemetry
-    shared_touch.run_background_task().await
 }

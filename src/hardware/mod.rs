@@ -26,6 +26,31 @@ use embedded_hal_bus::i2c::CriticalSectionDevice;
 pub use roller485::{Roller485, SharedRoller485, MotorCommand};
 pub use touch::{FT6336, TouchEvent, TouchPoint, ConfirmedPress, read_touch_data, SharedFT6336};
 
+/// Initialize touch controller background task.
+///
+/// Spawns the continuous polling and debouncing task for the touch controller.
+/// The hardware directly emits debounced press events via the channel.
+pub fn init_touch(
+    spawner: &embassy_executor::Spawner,
+    shared_touch: SharedFT6336<
+        esp_hal::i2c::master::I2c<'static, esp_hal::Blocking>,
+        8,
+    >,
+) -> Result<(), embassy_executor::SpawnError> {
+    spawner.spawn(run_touch_background(shared_touch))
+}
+
+/// Background task for touch controller polling and debouncing
+#[embassy_executor::task]
+async fn run_touch_background(
+    shared_touch: SharedFT6336<
+        esp_hal::i2c::master::I2c<'static, esp_hal::Blocking>,
+        8,
+    >,
+) {
+    shared_touch.run_background_task().await
+}
+
 /// Type alias for the display driver used on M5Stack CoreS3
 pub type CoreS3Display<'a> = mipidsi::Display<
     mipidsi::interface::SpiInterface<
